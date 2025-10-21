@@ -1,8 +1,8 @@
 ![CrowdStrike Falcon](/images/cs-logo.png?raw=true)
 
-# $SAMPLE_NAME sample Foundry app
+# Anomali ThreatStream sample Foundry app
 
-The $SAMPLE_NAME sample Foundry app is a community-driven, open source project which serves as an example of an app which can be built using CrowdStrike's Foundry ecosystem. `$REPOSITORY_NAME` is an open source project, not a CrowdStrike product. As such, it carries no formal support, expressed or implied.
+The Anomali ThreatStream sample Foundry app is a community-driven, open source project which serves as an example of an app which can be built using CrowdStrike's Foundry ecosystem. `foundry-sample-anomali-threatstream` is an open source project, not a CrowdStrike product. As such, it carries no formal support, expressed or implied.
 
 This app is one of several App Templates included in Foundry that you can use to jumpstart your development. It comes complete with a set of preconfigured capabilities aligned to its business purpose. Deploy this app from the Templates page with a single click in the Foundry UI, or create an app from this template using the CLI.
 
@@ -11,15 +11,12 @@ This app is one of several App Templates included in Foundry that you can use to
 
 ## Description
 
-_A description of this app's use case and what it does._
+Automates threat intelligence ingestion from Anomali ThreatStream, synchronizing IOCs (IPs, domains, URLs, email addresses, file hashes) hourly as CSV lookup files for Falcon Next-Gen SIEM detection and hunting workflows.
 
 ## Prerequisites
 
 * The Foundry CLI (instructions below).
-* _Delete or add tools below as required. These are from other samples._
-* Python 3.13+ (needed if modifying the app's functions). See [Python For Beginners](https://www.python.org/about/gettingstarted/) for installation instructions.
-* Go v1.23+ (needed if modifying the app's functions). See https://go.dev/learn for installation instructions.
-* Yarn (needed if modifying the app's UI). See https://yarnpkg.com/getting-started for installation instructions.
+* Python 3.13+ (needed if modifying the app's function). See [Python For Beginners](https://www.python.org/about/gettingstarted/) for installation instructions.
 
 ### Install the Foundry CLI
 
@@ -49,11 +46,11 @@ Run `foundry version` to verify it's installed correctly.
 
 ## Getting Started
 
-Clone this sample to your local system, or [download as a zip file](https://github.com/CrowdStrike/$REPOSITORY_NAME/archive/refs/heads/main.zip) and import it into Foundry.
+Clone this sample to your local system, or [download as a zip file](https://github.com/CrowdStrike/foundry-sample-anomali-threatstream/archive/refs/heads/main.zip) and import it into Foundry.
 
 ```shell
-git clone https://github.com/CrowdStrike/$REPOSITORY_NAME
-cd $REPOSITORY_NAME
+git clone https://github.com/CrowdStrike/foundry-sample-anomali-threatstream
+cd foundry-sample-anomali-threatstream
 ```
 
 Log in to Foundry:
@@ -88,7 +85,14 @@ Next, go to **Foundry** > **App catalog**, find your app, and install it. Go to 
 
 ## About this sample app
 
-_Describe your app and its components._
+This app includes:
+
+- **Foundry Function**: `anomali-ioc-ingest` - A Python function that ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM
+- **API Integration**: Anomali ThreatStream API configuration for authentication and data retrieval
+- **Collections**:
+  - `ingest_jobs` - Tracks each job run for ingesting IOCs
+  - `update_id_tracker` - Tracks the update_id from Anomali ThreatStream API for incremental sync
+- **Workflow**: Scheduled workflow that automatically runs the ingest function hourly to keep threat intelligence up to date
 
 ## Foundry resources
 

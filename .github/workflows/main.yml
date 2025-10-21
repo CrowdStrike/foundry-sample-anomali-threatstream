@@ -1,0 +1,52 @@
+name: Sample CI
+on: [ push, pull_request ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@0080882f6c36860b6ba35c610c98ce87d4e2f26f # v2.10.2
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v5
+      - name: Setup Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a20  # v6
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        working-directory: functions/anomali-ioc-ingest
+      - name: Run tests if test_main.py exists
+        run: |
+          if [ -f "test_main.py" ]; then
+            echo "Running tests with test_main.py"
+            pytest
+          else
+            echo "No test_main.py found, skipping tests"
+          fi
+        working-directory: functions/anomali-ioc-ingest
+      - name: Verify function starts
+        run: |
+          timeout 30s bash -c '
+            python main.py > output.log 2>&1 &
+            PID=$!
+            while ! grep -q "running at port 8081" output.log 2>/dev/null; do
+              sleep 1
+            done
+            echo "✅ Application started successfully"
+            kill $PID 2>/dev/null || true
+          ' || {
+            echo "❌ Application failed to start"
+            cat output.log 2>/dev/null || echo "No output log found"
+            exit 1
+          }
+        working-directory: functions/anomali-ioc-ingest
