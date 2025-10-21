@@ -1,12 +1,7 @@
 version: 2
 updates:
-  - package-ecosystem: gomod
-    directories:
-      - "/functions/go-function/"
-    schedule:
-      interval: weekly
   - package-ecosystem: pip
-    directory: "/functions/python-function/"
+    directory: "/functions/anomali-ioc-ingest/"
     schedule:
       interval: weekly
   - package-ecosystem: github-actions
