@@ -1,9 +1,13 @@
-.idea/
-.DS_Store
-
-# For Python functions
-.venv/
+# Python
 __pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+htmlcov/
+.coverage
 
-# For Go functions
-go.sum
+# IDEs
+.idea/
+
+# OS
+.DS_Store

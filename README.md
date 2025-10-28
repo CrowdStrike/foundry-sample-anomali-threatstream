@@ -6,7 +6,7 @@ The Anomali ThreatStream sample Foundry app is a community-driven, open source p
 
 This app is one of several App Templates included in Foundry that you can use to jumpstart your development. It comes complete with a set of preconfigured capabilities aligned to its business purpose. Deploy this app from the Templates page with a single click in the Foundry UI, or create an app from this template using the CLI.
 
-> [!IMPORTANT]  
+> [!IMPORTANT]
 > To view documentation and deploy this sample app, you need access to the Falcon console.
 
 ## Description
@@ -81,7 +81,7 @@ Once the deployment has finished, you can release the app:
 foundry apps release
 ```
 
-Next, go to **Foundry** > **App catalog**, find your app, and install it. Go to **Fusion SOAR** > **Workflows** to see the scheduled workflow from this app.
+Next, go to **Foundry** > **App catalog**, find your app, and install it. During installation, you'll be prompted to configure the Anomali ThreatStream API integration with your credentials (API key format: `email:key`). After installation, go to **Fusion SOAR** > **Workflows** to see the scheduled workflow from this app.
 
 ## About this sample app
 
@@ -93,6 +93,71 @@ This app includes:
   - `ingest_jobs` - Tracks each job run for ingesting IOCs
   - `update_id_tracker` - Tracks the update_id from Anomali ThreatStream API for incremental sync
 - **Workflow**: Scheduled workflow that automatically runs the ingest function hourly to keep threat intelligence up to date
+
+Key features:
+
+- **Automated IOC Ingestion**: Hourly synchronization of threat intelligence with workflow-managed pagination
+- **Multiple IOC Types**: IP addresses, domains, URLs, email addresses, file hashes (MD5/SHA1/SHA256)
+- **Incremental Sync**: Efficient processing using update_id tracking with type-specific state management
+- **Missing File Recovery**: Automatically recreates deleted lookup files on next run
+- **Early Termination**: Intelligent pagination stops when no new unique IOCs are found
+- **Secure Integration**: API-based authentication (no hardcoded credentials)
+- **Comprehensive Testing**: Extensive unit tests with 90%+ code coverage, stress testing scripts, and workflow simulation
+
+## Development
+
+### Local Development Setup
+
+1. **Create and activate virtual environment**:
+   ```bash
+   cd functions/anomali-ioc-ingest
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt --upgrade pip
+   ```
+
+### Running Tests
+
+**Unit Tests**: The project includes comprehensive unit tests:
+```bash
+python -m pytest test_main.py -v
+```
+
+**Test with Coverage**: Generate coverage reports (requires pytest-cov):
+```bash
+pip install pytest-cov
+python -m pytest test_main.py --cov=main --cov-report=html
+# View coverage report: open htmlcov/index.html
+```
+
+### Code Quality
+
+**Pylint**: Run static code analysis (configuration in `.pylintrc`):
+```bash
+python -m pylint main.py
+```
+
+### Debugging Functions Locally
+
+**Environment Variables**: Set up required environment variables for local testing:
+```bash
+export APP_ID="your-app-id"
+export FALCON_CLIENT_ID="your-client-id"  # Must have CustomStorage read/write scopes
+export FALCON_CLIENT_SECRET="your-client-secret"
+```
+
+**Run the function**:
+```bash
+python main.py
+```
+
+## Additional Documentation
+
+📖 **[App Documentation](app_docs/README.md)** - Complete setup instructions, usage, and threat intelligence queries
 
 ## Foundry resources
 

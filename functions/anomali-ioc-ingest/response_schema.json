@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "message": {
+      "type": "string",
+      "description": "Summary message of the ingestion process"
+    },
+    "total_iocs": {
+      "type": "integer",
+      "description": "Number of IOCs processed in this page"
+    },
+    "files_created": {
+      "type": "integer",
+      "description": "Number of CSV lookup files created or updated"
+    },
+    "upload_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Name of the uploaded file"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["success", "error"],
+            "description": "Upload status"
+          },
+          "message": {
+            "type": "string",
+            "description": "Upload result message"
+          }
+        }
+      },
+      "description": "Results of file uploads to NGSIEM"
+    },
+    "job_id": {
+      "type": "string",
+      "description": "Unique identifier for the ingestion job"
+    },
+    "meta": {
+      "type": "object",
+      "description": "Metadata from the Anomali API response"
+    },
+    "next": {
+      "type": "string",
+      "description": "Continuation token for workflow pagination (returned when more data is available)",
+      "nullable": true
+    },
+    "modified_ts_gt": {
+      "type": "string",
+      "description": "The modified timestamp greater than boundary used in this query (for workflow time constraint preservation)"
+    },
+    "modified_ts_lt": {
+      "type": "string",
+      "description": "The modified timestamp less than boundary used in this query (for workflow time constraint preservation)"
+    }
+  },
+  "required": [
+    "message",
+    "total_iocs",
+    "files_created",
+    "upload_results",
+    "job_id"
+  ],
+  "type": "object",
+  "description": "Response schema for Anomali ThreatStream IOC ingestion results with support for workflow-level pagination."
+}
