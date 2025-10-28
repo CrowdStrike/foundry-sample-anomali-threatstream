@@ -102,7 +102,7 @@ Key features:
 - **Missing File Recovery**: Automatically recreates deleted lookup files on next run
 - **Early Termination**: Intelligent pagination stops when no new unique IOCs are found
 - **Secure Integration**: API-based authentication (no hardcoded credentials)
-- **Comprehensive Testing**: Extensive unit tests with 90%+ code coverage, stress testing scripts, and workflow simulation
+- **Comprehensive Testing** (this branch): Extensive unit tests with 90%+ code coverage, stress testing scripts, and workflow simulation for local development
 
 ## Development
 
@@ -134,6 +134,12 @@ python -m pytest test_main.py --cov=main --cov-report=html
 # View coverage report: open htmlcov/index.html
 ```
 
+**Stress Testing**: Use the included stress test scripts to validate performance and reliability:
+```bash
+# See functions/anomali-ioc-ingest/README.md for details
+./run_stress_tests.sh
+```
+
 ### Code Quality
 
 **Pylint**: Run static code analysis (configuration in `.pylintrc`):
@@ -158,6 +164,7 @@ python main.py
 ## Additional Documentation
 
 📖 **[App Documentation](app_docs/README.md)** - Complete setup instructions, usage, and threat intelligence queries
+📖 **[Testing Guide](functions/anomali-ioc-ingest/README.md)** - Local development workflow, test scripts, and stress testing patterns
 
 ## Foundry resources
 
