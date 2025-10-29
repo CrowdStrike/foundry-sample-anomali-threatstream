@@ -1,0 +1,91 @@
+app_id: ""
+name: Anomali ThreatStream Next-Gen SIEM Connector
+description: Automates threat intelligence ingestion from Anomali ThreatStream, synchronizing IOCs (IPs, domains, URLs, email addresses, file hashes) hourly as CSV lookup files for Falcon Next-Gen SIEM detection and hunting workflows
+logo: images/logo.png
+vendor: Anomali
+vendor_products:
+    - ThreatStream
+use_case: Threat intelligence
+manifest_version: "2023-05-09"
+ignored:
+    - venv
+    - .*/venv/.*
+    - htmlcov
+    - .*/htmlcov/.*
+    - .*\.pyc$
+    - __pycache__
+    - .*/__pycache__/.*
+    - \.pytest_cache
+    - .*/\.pytest_cache/.*
+    - \.coverage$
+    - .*/test_.*\.py$
+ui:
+    homepage: ""
+    extensions: []
+    pages: {}
+    dashboards: {}
+    navigation: {}
+api_integrations:
+    - id: ""
+      name: Anomali API
+      description: Anomali ThreatStream API Integration
+      path: api-integrations/Anomali.json
+rtr_scripts: []
+collections:
+    - name: ingest_jobs
+      description: Tracks each job run for ingesting IOCs from Anomali ThreatStream into Falcon Next-Gen SIEM
+      schema: collections/ingest_jobs.json
+      permissions: []
+      workflow_integration: null
+    - name: update_id_tracker
+      description: Tracks the update_id returned from Anomali ThreatStream API to continue incremental sync
+      schema: collections/update_id_tracker.json
+      permissions: []
+      workflow_integration: null
+auth:
+    scopes:
+        - humio-auth-proxy:write
+        - humio-auth-proxy:read
+    permissions: {}
+    roles: []
+functions:
+    - id: ""
+      name: anomali-ioc-ingest
+      config: null
+      description: Ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM
+      path: functions/anomali-ioc-ingest
+      environment_variables: {}
+      handlers:
+        - name: Anomali Ingest
+          description: Ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM
+          method: POST
+          api_path: /ingest
+          payload_type: ""
+          request_schema: request_schema.json
+          response_schema: response_schema.json
+          workflow_integration:
+            id: ""
+            disruptive: false
+            system_action: false
+            tags:
+                - Anomali
+                - ThreatStream
+                - IOC
+                - NGSIEM
+          permissions: []
+      language: python
+      max_exec_duration_seconds: 900
+      max_exec_memory_mb: 1024
+workflows:
+    - id: ""
+      name: Anomali Threat Intelligence Ingest
+      path: workflows/Anomali_Threat_Intelligence_Ingest.yml
+      permissions: []
+parsers: []
+logscale:
+    saved_searches: []
+lookup_files: []
+docs:
+    id: ""
+    path: app_docs
+    entrypoint: README.md

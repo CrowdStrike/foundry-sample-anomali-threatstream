@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "repository": {
+      "type": "string",
+      "description": "Falcon Next-Gen SIEM repository name (defaults to 'search-all')",
+      "default": "search-all"
+    },
+    "status": {
+      "type": "string",
+      "description": "IOC status filter (default: 'active')",
+      "enum": ["active", "inactive", "all"],
+      "default": "active"
+    },
+    "type": {
+      "type": "string",
+      "description": "IOC type filter for parallel execution and workflow reuse",
+      "enum": ["ip", "domain", "url", "email", "hash", "md5", "sha1", "sha256"]
+    },
+    "trustedcircles": {
+      "type": "string",
+      "description": "Comma-separated feed IDs for filtering (e.g., '11631,12345')",
+      "pattern": "^[0-9]+(,[0-9]+)*$"
+    },
+    "feed_id": {
+      "type": "string",
+      "description": "Comma-separated feed IDs for filtering (e.g., '11631,12345')",
+      "pattern": "^[0-9]+(,[0-9]+)*$"
+    },
+    "modified_ts_gt": {
+      "type": "string",
+      "description": "Modified timestamp greater than (ISO format)",
+      "format": "date-time"
+    },
+    "modified_ts_lt": {
+      "type": "string",
+      "description": "Modified timestamp less than (ISO format)",
+      "format": "date-time"
+    },
+    "update_id_gt": {
+      "type": "string",
+      "description": "Update ID greater than"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Number of records to fetch per API call (default: 1000, max: 1000)",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 1000
+    },
+    "next": {
+      "type": "string",
+      "description": "Continuation token for workflow pagination"
+    }
+  },
+  "required": [],
+  "type": "object",
+  "description": "Request schema for Anomali ThreatStream IOC ingestion with support for filtering and workflow pagination."
+}

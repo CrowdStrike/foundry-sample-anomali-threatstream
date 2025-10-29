@@ -1,0 +1,79 @@
+name: Anomali Threat Intelligence Ingest
+description: Anomali ThreatStream IOC ingestion on schedule every hour
+parameters: {}
+provision_on_install: true
+trigger:
+    next:
+        - CreateVariable
+    event: Schedule
+    schedule:
+        time_cycle: 0 0/1 * * *
+        start_date: ""
+        end_date: ""
+        tz: Etc/UTC
+        skip_concurrent: true
+actions:
+    AnomaliIngest:
+        next:
+            - UpdateVariable
+        id: functions.anomali-ioc-ingest.Anomali Ingest
+        properties:
+            limit: 1000
+            repository: search-all
+            status: active
+        version_constraint: ~0
+    CreateVariable:
+        next:
+            - AnomaliIngest
+        id: 702d15788dbbffdf0b68d8e2f3599aa4
+        class: CreateVariable
+        properties:
+            variable_schema:
+                properties:
+                    next:
+                        type: string
+                type: object
+        version_constraint: ~1
+    UpdateVariable:
+        next:
+            - Loop
+        id: 6c6eab39063fa3b72d98c82af60deb8a
+        class: UpdateVariable
+        properties:
+            WorkflowCustomVariable:
+                next: ${data['AnomaliIngest.FaaS.anomali-ioc-ingest.AnomaliIngest.next']}
+        version_constraint: ~1
+loops:
+    Loop:
+        display: While next exists And next is not equal to 0; 500 iterations; 2 hour limit
+        for:
+            input: ""
+            condition: WorkflowCustomVariable.next:!null+WorkflowCustomVariable.next:!'0'
+            condition_display:
+                - next exists
+                - next is not equal to 0
+            continue_on_partial_execution: false
+            max_execution_seconds: 7200
+            max_iteration_count: 500
+            sequential: true
+        trigger:
+            next:
+                - AnomaliIngest2
+        actions:
+            AnomaliIngest2:
+                next:
+                    - UpdateVariable2
+                id: functions.anomali-ioc-ingest.Anomali Ingest
+                properties:
+                    limit: 1000
+                    next: ${data['WorkflowCustomVariable.next']}
+                    repository: search-all
+                    status: active
+                version_constraint: ~0
+            UpdateVariable2:
+                id: 6c6eab39063fa3b72d98c82af60deb8a
+                class: UpdateVariable
+                properties:
+                    WorkflowCustomVariable:
+                        next: ${data['AnomaliIngest2.FaaS.anomali-ioc-ingest.AnomaliIngest.next']}
+                version_constraint: ~1
