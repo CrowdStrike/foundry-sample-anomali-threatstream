@@ -80,45 +80,45 @@ class JobError(AnomaliFunctionError):
 IOC_TYPE_MAPPINGS = {
     "ip": {
         "columns": [
-            "destination.ip", "confidence", "threat_type", "source", "tags", 'expiration_ts'
+            "destination.ip", "confidence", "threat_type", "source", "tags", "expiration_ts"
         ],
-        "primary_field": 'ip'
+        "primary_field": "ip"
     },
     "domain": {
         "columns": [
-            "dns.domain.name", "confidence", "threat_type", "source", "tags", 'expiration_ts'
+            "dns.domain.name", "confidence", "threat_type", "source", "tags", "expiration_ts"
         ],
-        "primary_field": 'value'
+        "primary_field": "value"
     },
     "url": {
         "columns": [
-            "url.original", "confidence", "threat_type", "source", "tags", 'expiration_ts'
+            "url.original", "confidence", "threat_type", "source", "tags", "expiration_ts"
         ],
-        "primary_field": 'value'
+        "primary_field": "value"
     },
     "email": {
         "columns": [
-            "email.sender.address", "confidence", "threat_type", "source", "tags", 'expiration_ts'
+            "email.sender.address", "confidence", "threat_type", "source", "tags", "expiration_ts"
         ],
-        "primary_field": 'value'
+        "primary_field": "value"
     },
     "hash_md5": {
         "columns": [
-            "file.hash.md5", "confidence", "threat_type", "source", "tags", 'expiration_ts'
+            "file.hash.md5", "confidence", "threat_type", "source", "tags", "expiration_ts"
         ],
-        "primary_field": 'value'
+        "primary_field": "value"
     },
     "hash_sha1": {
         "columns": [
-            "file.hash.sha1", "confidence", "threat_type", "source", "tags", 'expiration_ts'
+            "file.hash.sha1", "confidence", "threat_type", "source", "tags", "expiration_ts"
         ],
-        "primary_field": 'value'
+        "primary_field": "value"
     },
     "hash_sha256": {
         "columns": [
-            "file.hash.sha256", "confidence", "threat_type", "source", "tags", 'expiration_ts'
+            "file.hash.sha256", "confidence", "threat_type", "source", "tags", "expiration_ts"
         ],
-        "primary_field": 'value'
+        "primary_field": "value"
     }
 }
 
@@ -575,13 +575,13 @@ def download_existing_lookup_files_from_ngsiem(
                 # FalconPy get_file returns binary data on success, dict on failure
                 if isinstance(download_response, bytes):
                     # Success - convert bytes to string
-                    file_content = download_response.decode('utf-8')
+                    file_content = download_response.decode("utf-8")
                     existing_files[filename] = file_content
                     logger.info(f"Successfully downloaded {filename} ({len(file_content)} bytes)")
                 elif isinstance(download_response, dict) and download_response.get("status_code") != 200:
                     logger.info(
                         f"File {filename} not found (expected for new files): "
-                        f"{download_response.get("status_code", 'unknown')}"
+                        f"{download_response.get('status_code', 'unknown')}"
                     )
                 else:
                     # Handle other response types
@@ -686,23 +686,23 @@ def process_iocs_to_csv(
     # Group IOCs by type
     iocs_by_type = {}
     for ioc in iocs:
-        ioc_type = ioc.get("itype", 'unknown')
+        ioc_type = ioc.get("itype", "unknown")
 
         # Map some common variations to standardized types
         if ioc_type in ["mal_ip", "c2_ip", "apt_ip"]:
-            ioc_type = 'ip'
+            ioc_type = "ip"
         elif ioc_type in ["mal_domain", "c2_domain", "apt_domain"]:
-            ioc_type = 'domain'
+            ioc_type = "domain"
         elif ioc_type in ["mal_url", "apt_url"]:
-            ioc_type = 'url'
+            ioc_type = "url"
         elif ioc_type in ["apt_email", "mal_email"]:
-            ioc_type = 'email'
+            ioc_type = "email"
         elif ioc_type in ["apt_md5", "mal_md5"]:
-            ioc_type = 'hash_md5'
+            ioc_type = "hash_md5"
         elif ioc_type in ["apt_sha1", "mal_sha1"]:
-            ioc_type = 'hash_sha1'
+            ioc_type = "hash_sha1"
         elif ioc_type in ["apt_sha256", "mal_sha256"]:
-            ioc_type = 'hash_sha256'
+            ioc_type = "hash_sha256"
 
         if ioc_type not in iocs_by_type:
             iocs_by_type[ioc_type] = []
@@ -712,9 +712,9 @@ def process_iocs_to_csv(
 
     created_files = []
     stats = {
-        'total_new_iocs': len(iocs),
-        'total_duplicates_removed': 0,
-        'files_with_new_data': 0
+        "total_new_iocs": len(iocs),
+        "total_duplicates_removed": 0,
+        "files_with_new_data": 0
     }
 
     for ioc_type, type_iocs in iocs_by_type.items():
@@ -748,7 +748,7 @@ def process_iocs_to_csv(
             tags = []
             if 'tags' in ioc and isinstance(ioc["tags"], list):
                 tags = [tag.get("name", '') for tag in ioc["tags"] if tag.get('name')]
-            tags_str = ','.join(tags) if tags else ''
+            tags_str = ",".join(tags) if tags else ""
 
             row = [
                 ioc.get(mapping["primary_field"], ''),  # Primary IOC value
@@ -789,7 +789,7 @@ def process_iocs_to_csv(
                 #
                 primary_col = mapping["columns"][0]
                 before_dedup = len(combined_df)
-                combined_df = combined_df.drop_duplicates(subset=[primary_col], keep='last')
+                combined_df = combined_df.drop_duplicates(subset=[primary_col], keep="last")
                 duplicates_removed = before_dedup - len(combined_df)
                 final_size = len(combined_df)
 
@@ -816,10 +816,10 @@ def process_iocs_to_csv(
                 logger.info(f"Created new {filename} with {len(combined_df)} records")
 
             # Ensure empty strings remain as empty strings, not NaN
-            combined_df = combined_df.fillna('')
+            combined_df = combined_df.fillna("")
 
             # Save to CSV
-            combined_df.to_csv(filepath, index=False, quoting=csv.QUOTE_ALL, encoding='utf-8')
+            combined_df.to_csv(filepath, index=False, quoting=csv.QUOTE_ALL, encoding="utf-8")
             created_files.append(filepath)
 
     return created_files, stats
@@ -1185,13 +1185,13 @@ def check_and_recover_missing_files(
     return should_start_fresh, existing_files
 
 
-@FUNC.handler(method="POST", path='/ingest')
+@FUNC.handler(method="POST", path="/ingest")
 def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logger) -> Response:
     """
     Main handler for IOC ingestion from Anomali ThreatStream.
 
     Processes a single page of IOCs for workflow-level pagination. The workflow
-    handles looping based on the 'next' token returned when more data is available.
+    handles looping based on the "next" token returned when more data is available.
 
     Args:
         request: The incoming request object containing the request body.
@@ -1202,10 +1202,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         Response: JSON response with single-page ingestion results and optional next token.
 
     Required fields in request body:
-    - repository: Falcon Next-Gen SIEM repository name (defaults to 'search-all')
+    - repository: Falcon Next-Gen SIEM repository name (defaults to "search-all")
 
     Optional fields:
-    - status: IOC status filter (default: 'active')
+    - status: IOC status filter (default: "active")
     - type: IOC type filter (ip, domain, url, email, hash) for parallel execution
     - trustedcircles: Comma-separated feed IDs for filtering (e.g., "11631,12345")
     - feed_id: Comma-separated feed IDs for filtering (alternative to trustedcircles)
@@ -1217,7 +1217,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
     try:
         # Parse request parameters
-        repository = request.body.get("repository", 'search-all').strip()
+        repository = request.body.get("repository", "search-all").strip()
         status_filter = request.body.get("status", None)  # No default status filter - get all IOCs
         trustedcircles = request.body.get("trustedcircles", None)  # Feed ID filtering
         feed_id = request.body.get("feed_id", None)  # Feed ID filtering (alternative parameter)
@@ -1398,5 +1398,5 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             code=500
         )
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     FUNC.run()
