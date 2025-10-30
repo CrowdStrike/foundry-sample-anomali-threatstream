@@ -947,9 +947,24 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
 
     return results
 
-def build_query_params(next_token, status_filter, type_filter, limit, api_client, headers, logger, job=None):
-    """Build query parameters for Anomali API call."""
-    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument
+def build_query_params(next_token, status_filter, type_filter, limit, api_client, headers, logger,
+                       job=None, request_body=None, trustedcircles=None, feed_id=None):
+    """Build query parameters for Anomali API call.
+
+    Args:
+        next_token: Pagination token
+        status_filter: Status filter
+        type_filter: IOC type filter
+        limit: Records per page
+        api_client: API client (unused, for compatibility)
+        headers: Request headers (unused, for compatibility)
+        logger: Logger instance
+        job: Job record with parameters
+        request_body: Request body for manual overrides
+        trustedcircles: Trusted circles filter
+        feed_id: Feed ID filter
+    """
+    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument,too-many-locals
     if next_token:
         # Pagination call: only use update_id__gt, no time constraints
         logger.info(f"PAGINATION BRANCH: Using next_token: {next_token}")
@@ -1006,6 +1021,32 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
         if status_filter and "status" not in query_params:
             query_params["status"] = status_filter
 
+        # Allow manual parameter overrides for initial calls only
+        if request_body:
+            if 'modified_ts_gt' in request_body:
+                query_params['modified_ts__gt'] = request_body['modified_ts_gt']
+                logger.info("INITIAL: Manual modified_ts_gt override applied")
+            if 'modified_ts_lt' in request_body:
+                query_params['modified_ts__lt'] = request_body['modified_ts_lt']
+                logger.info("INITIAL: Manual modified_ts_lt override applied")
+            if 'update_id_gt' in request_body:
+                old_value = query_params.get('update_id__gt')
+                query_params["update_id__gt"] = request_body['update_id_gt']
+                logger.info(
+                    f"INITIAL: Manual override changed update_id__gt from "
+                    f"{old_value} to {query_params['update_id__gt']}"
+                )
+
+    # Add trusted circles filtering if provided (works for both initial and pagination)
+    if trustedcircles:
+        logger.info(f"Filtering by trusted circles: {trustedcircles}")
+        query_params['trustedcircles'] = trustedcircles
+
+    # Add feed_id filtering if provided (works for both initial and pagination)
+    if feed_id:
+        logger.info(f"Filtering by feed_id: {feed_id}")
+        query_params['feed_id'] = feed_id
+
     return query_params
 
 
@@ -1056,6 +1097,92 @@ def extract_next_token_from_meta(meta, iocs, logger):
                 )
 
     return next_token
+
+
+def check_and_recover_missing_files(
+    repository: str,
+    type_filter: Optional[str],
+    api_client: APIHarnessV2,
+    headers: Dict[str, str],
+    logger: Logger
+) -> tuple[bool, Dict[str, str]]:
+    """Check for existing lookup files and handle missing file recovery.
+
+    Args:
+        repository: NGSIEM repository name
+        type_filter: Optional IOC type filter
+        api_client: API client for collections access
+        headers: Request headers
+        logger: Logger instance
+
+    Returns:
+        tuple: (should_start_fresh, existing_files) where should_start_fresh indicates
+               if all files are missing and existing_files is a dict of filename -> content
+    """
+    should_start_fresh = False
+    existing_files = {}
+
+    if not type_filter:
+        # No type specified - check if any Anomali files exist
+        logger.info("No type filter specified - checking for any existing Anomali lookup files")
+        existing_files = download_existing_lookup_files(repository, None, logger)
+        if not existing_files:
+            logger.info("No existing Anomali lookup files found - starting completely fresh")
+            should_start_fresh = True
+        else:
+            logger.info(
+                f"Found {len(existing_files)} existing Anomali lookup files - "
+                "continuing incremental sync"
+            )
+
+            # Check for missing specific type files and clear their update_ids
+            # Build expected files list dynamically from IOC_TYPE_MAPPINGS
+            expected_files = [
+                f"anomali_threatstream_{ioc_type}.csv" for ioc_type in IOC_TYPE_MAPPINGS
+            ]
+
+            missing_files = [f for f in expected_files if f not in existing_files]
+            if missing_files:
+                logger.info(
+                    f"Detected missing files: {missing_files} - "
+                    "clearing update_ids for these types"
+                )
+
+                for missing_file in missing_files:
+                    # Extract type from filename (remove prefix and suffix)
+                    filename_base = missing_file.replace(
+                        "anomali_threatstream_", ""
+                    ).replace(".csv", "")
+
+                    # Map filename back to collection key
+                    if filename_base.startswith("hash_"):
+                        collection_type = "hash"  # All hash types use the same collection key
+                    else:
+                        collection_type = filename_base
+
+                    clear_update_id_for_type(api_client, headers, collection_type, logger)
+
+                # Also clear the main last_update key
+                logger.info("Clearing main last_update key to ensure fresh start for missing file types")
+                try:
+                    api_client.command("DeleteObject",
+                                     collection_name=COLLECTION_UPDATE_TRACKER,
+                                     object_key=KEY_LAST_UPDATE,
+                                     headers=headers)
+                    logger.info("Successfully cleared main last_update key")
+                except Exception as e:
+                    logger.info(f"Main last_update key was already cleared or didn't exist: {str(e)}")
+    else:
+        # Type filter specified - always download existing files for that type
+        logger.info(f"Checking for existing files for type: {type_filter}")
+        existing_files = download_existing_lookup_files(repository, type_filter, logger)
+        if not existing_files:
+            logger.info(f"No existing files found for type {type_filter} - will create new file")
+            clear_update_id_for_type(api_client, headers, type_filter, logger)
+        else:
+            logger.info(f"Found existing files for type {type_filter} - will merge with existing data")
+
+    return should_start_fresh, existing_files
 
 
 @FUNC.handler(method='POST', path='/ingest')
@@ -1126,72 +1253,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         if os.environ.get("APP_ID"):
             headers = {"X-CS-APP-ID": os.environ.get("APP_ID")}
 
-        # Determine fresh start based on file existence - only for complete absence of all files
-        should_start_fresh = False
-        existing_files = {}
-
-        if not type_filter:
-            # No type specified - check if any Anomali files exist
-            logger.info("No type filter specified - checking for any existing Anomali lookup files")
-            existing_files = download_existing_lookup_files(repository, None, logger)
-            if not existing_files:
-                logger.info("No existing Anomali lookup files found - starting completely fresh")
-                should_start_fresh = True
-            else:
-                logger.info(
-                    f"Found {len(existing_files)} existing Anomali lookup files - "
-                    "continuing incremental sync"
-                )
-
-                # Check for missing specific type files and clear their update_ids
-                # Build expected files list dynamically from IOC_TYPE_MAPPINGS
-                expected_files = [
-                    f"anomali_threatstream_{ioc_type}.csv" for ioc_type in IOC_TYPE_MAPPINGS
-                ]
-
-                missing_files = [f for f in expected_files if f not in existing_files]
-                if missing_files:
-                    logger.info(
-                        f"Detected missing files: {missing_files} - "
-                        "clearing update_ids for these types"
-                    )
-
-                    for missing_file in missing_files:
-                        # Extract type from filename (remove prefix and suffix)
-                        filename_base = missing_file.replace(
-                            "anomali_threatstream_", ""
-                        ).replace(".csv", "")
-
-                        # Map filename back to collection key - most are direct, but hash types need special handling
-                        if filename_base.startswith("hash_"):
-                            collection_type = "hash"  # All hash types use the same collection key
-                        else:
-                            collection_type = filename_base  # Direct mapping for ip, domain, url, email
-
-                        clear_update_id_for_type(api_client, headers, collection_type, logger)
-
-                    # Also clear the main last_update key when running with no type filter and files are missing
-                    # This ensures get_last_update_id returns None and triggers fresh start for missing types
-                    logger.info("Clearing main last_update key to ensure fresh start for missing file types")
-                    try:
-                        api_client.command("DeleteObject",
-                                         collection_name=COLLECTION_UPDATE_TRACKER,
-                                         object_key=KEY_LAST_UPDATE,
-                                         headers=headers)
-                        logger.info("Successfully cleared main last_update key")
-                    except Exception as e:
-                        logger.info(f"Main last_update key was already cleared or didn't exist: {str(e)}")
-        else:
-            # Type filter specified - always download existing files for that type but don't trigger fresh start
-            logger.info(f"Checking for existing files for type: {type_filter}")
-            existing_files = download_existing_lookup_files(repository, type_filter, logger)
-            if not existing_files:
-                logger.info(f"No existing files found for type {type_filter} - will create new file for this type")
-                # Clear update_id for this specific type so it starts from the beginning
-                clear_update_id_for_type(api_client, headers, type_filter, logger)
-            else:
-                logger.info(f"Found existing files for type {type_filter} - will merge with existing data")
-            # Never trigger fresh start for type-specific calls - each type manages its own state
+        # Check for existing files and handle missing file recovery
+        should_start_fresh, existing_files = check_and_recover_missing_files(
+            repository, type_filter, api_client, headers, logger
+        )
 
         if should_start_fresh:
             logger.info("Starting completely fresh sync - clearing all collection data")
@@ -1216,34 +1281,9 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             logger.info(f"Building query params: next_token='{next_token}', bool={bool(next_token)}")
 
             query_params = build_query_params(
-                next_token, status_filter, type_filter, limit, api_client, headers, logger, job
+                next_token, status_filter, type_filter, limit, api_client, headers, logger, job,
+                request_body=request.body, trustedcircles=trustedcircles, feed_id=feed_id
             )
-
-            # Allow manual parameter overrides for initial calls only
-            if not next_token:
-                if 'modified_ts_gt' in request.body:
-                    query_params['modified_ts__gt'] = request.body['modified_ts_gt']
-                    logger.info("INITIAL: Manual modified_ts_gt override applied")
-                if 'modified_ts_lt' in request.body:
-                    query_params['modified_ts__lt'] = request.body['modified_ts_lt']
-                    logger.info("INITIAL: Manual modified_ts_lt override applied")
-                if 'update_id_gt' in request.body:
-                    old_value = query_params.get('update_id__gt')
-                    query_params["update_id__gt"] = request.body['update_id_gt']
-                    logger.info(
-                        f"INITIAL: Manual override changed update_id__gt from "
-                        f"{old_value} to {query_params["update_id__gt"]}"
-                    )
-
-            # Add trusted circles filtering if provided
-            if trustedcircles:
-                logger.info(f"Filtering by trusted circles: {trustedcircles}")
-                query_params['trustedcircles'] = trustedcircles
-
-            # Add feed_id filtering if provided
-            if feed_id:
-                logger.info(f"Filtering by feed_id: {feed_id}")
-                query_params['feed_id'] = feed_id
 
             logger.info(f"Final query_params before API call: {query_params}")
 
