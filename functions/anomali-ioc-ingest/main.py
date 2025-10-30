@@ -136,43 +136,35 @@ def get_last_update_id(
     api_client: APIHarnessV2, headers: Dict[str, str], ioc_type: Optional[str], logger: Logger
 ) -> Optional[Dict]:
     """Get the last update_id from collections for incremental sync"""
+    # Use simple per-type key: last_update_ip, last_update_domain, etc.
+    if ioc_type:
+        object_key = f"last_update_{ioc_type}"
+    else:
+        object_key = "last_update"
+
+    logger.info(f"Fetching last update_id from collections with key: {object_key}")
+
+    # Try to get the object directly
     try:
-        # Use simple per-type key: last_update_ip, last_update_domain, etc.
-        if ioc_type:
-            object_key = f"last_update_{ioc_type}"
-        else:
-            object_key = "last_update"
+        response = api_client.command("GetObject",
+                                    collection_name=COLLECTION_UPDATE_TRACKER,
+                                    object_key=object_key,
+                                    headers=headers)
 
-        logger.info(f"Fetching last update_id from collections with key: {object_key}")
-
-        # Try to get the object directly
-        try:
-            response = api_client.command("GetObject",
-                                        collection_name=COLLECTION_UPDATE_TRACKER,
-                                        object_key=object_key,
-                                        headers=headers)
-
-            # GetObject returns bytes directly, need to decode
-            update_data = json.loads(response.decode("utf-8"))
-            logger.info(
-                f"Retrieved last update data for {ioc_type or 'all types'}: {update_data}"
-            )
-            return update_data
-
-        except Exception:
-            # If GetObject fails, it likely means the object doesn't exist
-            logger.info(
-                f"No previous update_id found for {ioc_type or 'all types'}, "
-                "will fetch recent data"
-            )
-            return None
-
-    except Exception as e:
-        logger.error(
-            f"Error getting last update_id for {ioc_type or 'all types'}: {str(e)}",
-            exc_info=True
+        # GetObject returns bytes directly, need to decode
+        update_data = json.loads(response.decode("utf-8"))
+        logger.info(
+            f"Retrieved last update data for {ioc_type or 'all types'}: {update_data}"
         )
-        raise
+        return update_data
+
+    except Exception:
+        # If GetObject fails, it likely means the object doesn't exist
+        logger.info(
+            f"No previous update_id found for {ioc_type or 'all types'}, "
+            "will fetch recent data"
+        )
+        return None
 
 def save_update_id(
     api_client: APIHarnessV2,
@@ -489,11 +481,11 @@ def download_existing_lookup_files_locally(
                                   if any(pattern in f for pattern in type_patterns)]
             else:
                 # Map specific hash types
-                if ioc_type in ["md5"]:
+                if ioc_type == "md5":
                     type_filter = "hash_md5"
-                elif ioc_type in ["sha1"]:
+                elif ioc_type == "sha1":
                     type_filter = "hash_sha1"
-                elif ioc_type in ["sha256"]:
+                elif ioc_type == "sha256":
                     type_filter = "hash_sha256"
 
                 filenames_to_try = [f for f in known_filenames if type_filter in f]
@@ -530,7 +522,7 @@ def download_existing_lookup_files_from_ngsiem(
     repository: str, ioc_type: Optional[str], logger: Logger
 ) -> Dict[str, str]:
     """Download existing lookup files from Falcon Next-Gen SIEM repository (original implementation)"""
-    ngsiem = NGSIEM(base_url=os.environ.get("CS_CLOUD"))
+    ngsiem = NGSIEM()
     existing_files = {}
 
     try:
@@ -557,11 +549,11 @@ def download_existing_lookup_files_from_ngsiem(
                                   if any(pattern in f for pattern in type_patterns)]
             else:
                 # Map specific hash types
-                if ioc_type in ["md5"]:
+                if ioc_type == "md5":
                     type_filter = "hash_md5"
-                elif ioc_type in ["sha1"]:
+                elif ioc_type == "sha1":
                     type_filter = "hash_sha1"
-                elif ioc_type in ["sha256"]:
+                elif ioc_type == "sha256":
                     type_filter = "hash_sha256"
 
                 filenames_to_try = [f for f in known_filenames if type_filter in f]
@@ -886,7 +878,7 @@ def upload_csv_files_locally(csv_files: List[str], repository: str, logger: Logg
 
 def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, logger: Logger) -> List[Dict]:
     """Upload CSV files to Falcon Next-Gen SIEM as lookup files (original implementation)"""
-    ngsiem = NGSIEM(base_url=os.environ.get("CS_CLOUD"))
+    ngsiem = NGSIEM()
     results = []
 
     for csv_file in csv_files:
@@ -957,69 +949,64 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
 
 def build_query_params(next_token, status_filter, type_filter, limit, api_client, headers, logger, job=None):
     """Build query parameters for Anomali API call."""
-    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches
-    try:
-        if next_token:
-            # Pagination call: only use update_id__gt, no time constraints
-            logger.info(f"PAGINATION BRANCH: Using next_token: {next_token}")
+    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument
+    if next_token:
+        # Pagination call: only use update_id__gt, no time constraints
+        logger.info(f"PAGINATION BRANCH: Using next_token: {next_token}")
+        query_params = {
+            "order_by": "update_id",
+            "limit": limit,
+            "update_id__gt": next_token
+        }
+        # Add status filter only if specified
+        if status_filter:
+            query_params['status'] = status_filter
+        # For pagination, use the type filter if specified
+        if type_filter:
+            query_params['type'] = type_filter  # Use type for pagination consistency
+        logger.info(f"PAGINATION: Set update_id__gt to: {query_params['update_id__gt']}")
+        # NOTE: No time constraints for pagination - they limit data incorrectly
+    else:
+        # Initial call: use job parameters if available
+        logger.info("INITIAL BRANCH: Building parameters for initial call")
+
+        if job and job.get("parameters"):
+            # Use job's stored parameters (preferred approach)
+            query_params = job["parameters"].copy()  # Copy all job parameters
+            query_params["limit"] = limit  # Override limit with request parameter
+            query_params["order_by"] = "update_id"  # Ensure consistent ordering
+
+            logger.info(f"INITIAL: Using job's stored parameters: {query_params}")
+
+            # Override status if explicitly provided in request
+            if status_filter:
+                query_params["status"] = status_filter
+                logger.info(f"INITIAL: Overriding status with request parameter: {status_filter}")
+
+        else:
+            # Fallback logic for when no job exists (shouldn't happen with new architecture)
+            logger.warning("INITIAL: No job found - using fallback parameter construction")
+
+            start_update_id = "0"
             query_params = {
                 "order_by": "update_id",
                 "limit": limit,
-                "update_id__gt": next_token
+                "update_id__gt": start_update_id
             }
-            # Add status filter only if specified
-            if status_filter:
-                query_params['status'] = status_filter
-            # For pagination, use the type filter if specified
+
+            # Add type filter if specified
             if type_filter:
-                query_params['type'] = type_filter  # Use type for pagination consistency
-            logger.info(f"PAGINATION: Set update_id__gt to: {query_params['update_id__gt']}")
-            # NOTE: No time constraints for pagination - they limit data incorrectly
-        else:
-            # Initial call: use job parameters if available
-            logger.info("INITIAL BRANCH: Building parameters for initial call")
+                query_params["type"] = type_filter
 
-            if job and job.get("parameters"):
-                # Use job's stored parameters (preferred approach)
-                query_params = job["parameters"].copy()  # Copy all job parameters
-                query_params["limit"] = limit  # Override limit with request parameter
-                query_params["order_by"] = "update_id"  # Ensure consistent ordering
+            # Add status filter if specified
+            if status_filter:
+                query_params["status"] = status_filter
 
-                logger.info(f"INITIAL: Using job's stored parameters: {query_params}")
+        # Add status filter only if specified (for both job and fallback cases)
+        if status_filter and "status" not in query_params:
+            query_params['status'] = status_filter
 
-                # Override status if explicitly provided in request
-                if status_filter:
-                    query_params["status"] = status_filter
-                    logger.info(f"INITIAL: Overriding status with request parameter: {status_filter}")
-
-            else:
-                # Fallback logic for when no job exists (shouldn't happen with new architecture)
-                logger.warning("INITIAL: No job found - using fallback parameter construction")
-
-                start_update_id = "0"
-                query_params = {
-                    "order_by": "update_id",
-                    "limit": limit,
-                    "update_id__gt": start_update_id
-                }
-
-                # Add type filter if specified
-                if type_filter:
-                    query_params["type"] = type_filter
-
-                # Add status filter if specified
-                if status_filter:
-                    query_params["status"] = status_filter
-
-            # Add status filter only if specified (for both job and fallback cases)
-            if status_filter and "status" not in query_params:
-                query_params['status'] = status_filter
-
-        return query_params
-
-    except Exception as e:
-        logger.error(f"Error in query param construction: {e}", exc_info=True)
-        raise
+    return query_params
 
 
 def extract_next_token_from_meta(meta, iocs, logger):
@@ -1129,10 +1116,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         )
 
         # Initialize clients
-        api_integrations = APIIntegrations(base_url=os.environ.get("CS_CLOUD"))
-        api_client = APIHarnessV2(base_url=os.environ.get("CS_CLOUD"))
+        api_integrations = APIIntegrations()
+        api_client = APIHarnessV2()
 
         # Set up headers for collections
+        # Note: X-CS-APP-ID is needed for local development when accessing collections
+        # In production, Foundry automatically sets this header
         headers = {}
         if os.environ.get("APP_ID"):
             headers = {"X-CS-APP-ID": os.environ.get("APP_ID")}
