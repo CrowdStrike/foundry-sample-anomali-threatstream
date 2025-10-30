@@ -78,47 +78,47 @@ class JobError(AnomaliFunctionError):
 
 # IOC type mappings for CSV column headers
 IOC_TYPE_MAPPINGS = {
-    'ip': {
-        'columns': [
+    "ip": {
+        "columns": [
             'destination.ip', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
         ],
-        'primary_field': 'ip'
+        "primary_field": 'ip'
     },
-    'domain': {
-        'columns': [
+    "domain": {
+        "columns": [
             'dns.domain.name', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
         ],
-        'primary_field': 'value'
+        "primary_field": 'value'
     },
-    'url': {
-        'columns': [
+    "url": {
+        "columns": [
             'url.original', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
         ],
-        'primary_field': 'value'
+        "primary_field": 'value'
     },
-    'email': {
-        'columns': [
+    "email": {
+        "columns": [
             'email.sender.address', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
         ],
-        'primary_field': 'value'
+        "primary_field": 'value'
     },
     'hash_md5': {
-        'columns': [
+        "columns": [
             'file.hash.md5', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
         ],
-        'primary_field': 'value'
+        "primary_field": 'value'
     },
     'hash_sha1': {
-        'columns': [
+        "columns": [
             'file.hash.sha1', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
         ],
-        'primary_field': 'value'
+        "primary_field": 'value'
     },
     'hash_sha256': {
-        'columns': [
+        "columns": [
             'file.hash.sha256', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
         ],
-        'primary_field': 'value'
+        "primary_field": 'value'
     }
 }
 
@@ -301,12 +301,12 @@ def update_job(api_client: APIHarnessV2, headers: Dict[str, str], job: Dict, log
     test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
 
     if test_mode:
-        logger.info(f"TEST MODE: Mock job update for {job['id']} with state: {job['state']}")
+        logger.info(f"TEST MODE: Mock job update for {job["id"]} with state: {job["state"]}")
         return
 
     # Production mode - original job update logic
     try:
-        logger.info(f"Updating job {job['id']} with state: {job['state']}")
+        logger.info(f"Updating job {job["id"]} with state: {job["state"]}")
 
         response = api_client.command("PutObject",
                                     body=job,
@@ -317,7 +317,7 @@ def update_job(api_client: APIHarnessV2, headers: Dict[str, str], job: Dict, log
         if response["status_code"] != 200:
             raise JobError(f"Failed to update job: {response}")
 
-        logger.info(f"Successfully updated job {job['id']}")
+        logger.info(f"Successfully updated job {job["id"]}")
 
     except Exception as e:
         logger.error(f"Error updating job: {str(e)}", exc_info=True)
@@ -354,7 +354,7 @@ def fetch_iocs_from_anomali(
                 }
             )
 
-            logger.info(f"Anomali API response status: {response['status_code']}")
+            logger.info(f"Anomali API response status: {response["status_code"]}")
 
             # Check for rate limiting in multiple formats
             is_rate_limited = False
@@ -409,7 +409,7 @@ def fetch_iocs_from_anomali(
             if response["status_code"] not in [200, 207]:
                 error_message = response.get("body", {}).get("errors", "Unknown error")
                 raise APIIntegrationError(
-                    f"API call failed with status {response['status_code']}: {error_message}"
+                    f"API call failed with status {response["status_code"]}: {error_message}"
                 )
 
             response_data = response.get("body", {})
@@ -581,7 +581,7 @@ def download_existing_lookup_files_from_ngsiem(
                 elif isinstance(download_response, dict) and download_response.get("status_code") != 200:
                     logger.info(
                         f"File {filename} not found (expected for new files): "
-                        f"{download_response.get('status_code', 'unknown')}"
+                        f"{download_response.get("status_code", 'unknown')}"
                     )
                 else:
                     # Handle other response types
@@ -686,7 +686,7 @@ def process_iocs_to_csv(
     # Group IOCs by type
     iocs_by_type = {}
     for ioc in iocs:
-        ioc_type = ioc.get('itype', 'unknown')
+        ioc_type = ioc.get("itype", 'unknown')
 
         # Map some common variations to standardized types
         if ioc_type in ['mal_ip', 'c2_ip', 'apt_ip']:
@@ -746,17 +746,17 @@ def process_iocs_to_csv(
         for ioc in type_iocs:
             # Extract tags as comma-separated string
             tags = []
-            if 'tags' in ioc and isinstance(ioc['tags'], list):
-                tags = [tag.get('name', '') for tag in ioc['tags'] if tag.get('name')]
+            if 'tags' in ioc and isinstance(ioc["tags"], list):
+                tags = [tag.get('name', '') for tag in ioc["tags"] if tag.get('name')]
             tags_str = ','.join(tags) if tags else ''
 
             row = [
                 ioc.get(mapping['primary_field'], ''),  # Primary IOC value
-                str(ioc.get('confidence', '')),  # Convert to string
-                ioc.get('threat_type', ''),
-                ioc.get('source', ''),
+                str(ioc.get("confidence", '')),  # Convert to string
+                ioc.get("threat_type", ''),
+                ioc.get("source", ''),
                 tags_str,
-                ioc.get('expiration_ts', '')
+                ioc.get("expiration_ts", '')
             ]
             new_rows.append(row)
 
@@ -960,11 +960,11 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
         }
         # Add status filter only if specified
         if status_filter:
-            query_params['status'] = status_filter
+            query_params["status"] = status_filter
         # For pagination, use the type filter if specified
         if type_filter:
-            query_params['type'] = type_filter  # Use type for pagination consistency
-        logger.info(f"PAGINATION: Set update_id__gt to: {query_params['update_id__gt']}")
+            query_params["type"] = type_filter  # Use type for pagination consistency
+        logger.info(f"PAGINATION: Set update_id__gt to: {query_params["update_id__gt"]}")
         # NOTE: No time constraints for pagination - they limit data incorrectly
     else:
         # Initial call: use job parameters if available
@@ -1004,7 +1004,7 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
 
         # Add status filter only if specified (for both job and fallback cases)
         if status_filter and "status" not in query_params:
-            query_params['status'] = status_filter
+            query_params["status"] = status_filter
 
     return query_params
 
@@ -1013,9 +1013,9 @@ def extract_next_token_from_meta(meta, iocs, logger):
     """Extract next pagination token from API response metadata."""
     next_token = None
 
-    if meta and meta.get('next') and iocs:
+    if meta and meta.get("next") and iocs:
         # Parse the API's next URL to get the proper pagination parameters
-        next_url = meta.get('next')
+        next_url = meta.get("next")
         try:
             # Extract from_update_id or search_after from the next URL
             parsed_url = urlparse(next_url)
@@ -1028,7 +1028,7 @@ def extract_next_token_from_meta(meta, iocs, logger):
                     f"More data available - next pagination token (search_after): {next_token}"
                 )
             elif 'update_id__gt' in query_params_parsed:
-                next_token = query_params_parsed['update_id__gt'][0]
+                next_token = query_params_parsed["update_id__gt"][0]
                 logger.info(
                     f"More data available - next pagination token (update_id__gt): {next_token}"
                 )
@@ -1041,7 +1041,7 @@ def extract_next_token_from_meta(meta, iocs, logger):
                 # Fallback to last IOC's update_id
                 last_ioc = iocs[-1]
                 if 'update_id' in last_ioc:
-                    next_token = str(last_ioc['update_id'])
+                    next_token = str(last_ioc["update_id"])
                     logger.info(
                         f"More data available - next pagination token (fallback): {next_token}"
                     )
@@ -1050,7 +1050,7 @@ def extract_next_token_from_meta(meta, iocs, logger):
             # Fallback to last IOC's update_id
             last_ioc = iocs[-1]
             if 'update_id' in last_ioc:
-                next_token = str(last_ioc['update_id'])
+                next_token = str(last_ioc["update_id"])
                 logger.info(
                     f"More data available - next pagination token (fallback): {next_token}"
                 )
@@ -1091,14 +1091,14 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
     try:
         # Parse request parameters
         repository = request.body.get('repository', 'search-all').strip()
-        status_filter = request.body.get('status', None)  # No default status filter - get all IOCs
-        trustedcircles = request.body.get('trustedcircles', None)  # Feed ID filtering
-        feed_id = request.body.get('feed_id', None)  # Feed ID filtering (alternative parameter)
-        next_token = request.body.get('next', None)  # Workflow pagination continuation
+        status_filter = request.body.get("status", None)  # No default status filter - get all IOCs
+        trustedcircles = request.body.get("trustedcircles", None)  # Feed ID filtering
+        feed_id = request.body.get("feed_id", None)  # Feed ID filtering (alternative parameter)
+        next_token = request.body.get("next", None)  # Workflow pagination continuation
         limit = request.body.get('limit', 1000)  # Number of records per API call
 
         # Parse type filter - only support single type or no type
-        type_filter = request.body.get('type', None)  # Single IOC type filter
+        type_filter = request.body.get("type", None)  # Single IOC type filter
         if type_filter and ',' in str(type_filter):
             error_msg = (
                 "Comma-delimited types not supported. Use no type filter to get all types, "
@@ -1229,10 +1229,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     logger.info("INITIAL: Manual modified_ts_lt override applied")
                 if 'update_id_gt' in request.body:
                     old_value = query_params.get('update_id__gt')
-                    query_params['update_id__gt'] = request.body['update_id_gt']
+                    query_params["update_id__gt"] = request.body['update_id_gt']
                     logger.info(
                         f"INITIAL: Manual override changed update_id__gt from "
-                        f"{old_value} to {query_params['update_id__gt']}"
+                        f"{old_value} to {query_params["update_id__gt"]}"
                     )
 
             # Add trusted circles filtering if provided
@@ -1301,7 +1301,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             # Update collections with latest state
             if meta and iocs:
                 # Get the highest update_id from processed IOCs
-                update_ids = [str(ioc['update_id']) for ioc in iocs if 'update_id' in ioc]
+                update_ids = [str(ioc["update_id"]) for ioc in iocs if 'update_id' in ioc]
                 max_update_id = max(update_ids) if update_ids else "0"
 
                 update_data = {
