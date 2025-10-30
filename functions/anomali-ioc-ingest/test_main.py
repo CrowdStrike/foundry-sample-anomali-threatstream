@@ -201,11 +201,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
     @patch('main.APIIntegrations')
     @patch('main.APIHarnessV2')
     @patch('main.download_existing_lookup_files')
-    @patch('main.clear_ioc_index_for_recovery')
     @patch('main.clear_update_id_for_type')
     @patch('main.NGSIEM')
     @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
-    def test_missing_file_recovery_scenario(self, mock_ngsiem_class, mock_clear_update_id, mock_clear_index,
+    def test_missing_file_recovery_scenario(self, mock_ngsiem_class, mock_clear_update_id,
                                           mock_download_files, mock_api_harness_class,
                                           mock_api_integrations_class):
         """Test the critical missing file recovery logic (lines 1253-1288)."""
@@ -268,7 +267,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         response = main.on_post(request, _config=None, logger=mock_logger)
 
         # Verify recovery actions were taken
-        mock_clear_index.assert_called_once()  # IOC index cleared for recovery
+        # Note: clear_ioc_index_for_recovery function has been removed as smart deduplication was disabled
 
         # Verify update_id clearing for missing file types
         expected_clear_calls = [

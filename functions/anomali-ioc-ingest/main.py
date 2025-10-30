@@ -125,7 +125,6 @@ IOC_TYPE_MAPPINGS = {
 # Collection names
 COLLECTION_UPDATE_TRACKER = "update_id_tracker"
 COLLECTION_INGEST_JOBS = "ingest_jobs"
-COLLECTION_IOC_INDEX = "anomali_ioc_index"  # Smart deduplication index
 KEY_LAST_UPDATE = "last_update"
 
 # Job states
@@ -339,118 +338,6 @@ def format_elapsed_time(elapsed_seconds: float) -> str:
         seconds = elapsed_seconds % 60
         return f"{minutes}m {seconds:.1f}s"
     return f"{elapsed_seconds:.1f}s"
-
-
-def clear_ioc_index_for_recovery(api_client: APIHarnessV2, headers: Dict, logger):
-    """Clear IOC index collections when entering recovery scenario"""
-    try:
-        cleared_types = []
-        for ioc_type in IOC_TYPE_MAPPINGS.keys():
-            try:
-                api_client.command("DeleteObject",
-                                  collection_name=COLLECTION_IOC_INDEX,
-                                  object_key=f"known_{ioc_type}",
-                                  headers=headers)
-                cleared_types.append(ioc_type)
-            except Exception:
-                # Index might not exist, which is fine
-                pass
-
-        if cleared_types:
-            logger.info(f"Cleared IOC index for recovery scenario: {cleared_types}")
-        else:
-            logger.info("No IOC index found to clear (fresh start)")
-
-    except Exception as e:
-        logger.error(f"Failed to clear IOC index for recovery: {str(e)}")
-
-
-def get_known_iocs_for_type(api_client: APIHarnessV2, headers: Dict, ioc_type: str, logger) -> set:
-    """Get set of known IOCs for a type from index collection for smart deduplication"""
-    try:
-        response = api_client.command("GetObject",
-                                    collection_name=COLLECTION_IOC_INDEX,
-                                    object_key=f"known_{ioc_type}",
-                                    headers=headers)
-        if response['status_code'] == 200 and 'data' in response['body']:
-            iocs_data = response['body']['data'].get('iocs', [])
-            known_iocs = set(iocs_data)
-            logger.info(f"Loaded {len(known_iocs)} known {ioc_type} IOCs from index")
-            return known_iocs
-        else:
-            logger.info(f"No existing IOC index found for {ioc_type} (first run)")
-            return set()
-    except Exception as e:
-        logger.warning(f"Failed to load IOC index for {ioc_type}: {str(e)}")
-        return set()
-
-
-def update_known_iocs_index(api_client: APIHarnessV2, headers: Dict, ioc_type: str,
-                           new_iocs: set, logger, max_index_size: int = 500000):
-    """Update known IOCs index with new IOCs for smart deduplication"""
-    try:
-        # Get existing known IOCs
-        known_iocs = get_known_iocs_for_type(api_client, headers, ioc_type, logger)
-
-        # Add new IOCs
-        original_size = len(known_iocs)
-        known_iocs.update(new_iocs)
-
-        # Manage index size - keep most recent IOCs if too large
-        if len(known_iocs) > max_index_size:
-            # Convert to list, sort, and keep last N items (most recent)
-            known_iocs = set(list(known_iocs)[-max_index_size:])
-            logger.info(f"Trimmed {ioc_type} IOC index to {max_index_size} entries")
-
-        # Save updated index
-        api_client.command("CreateObject",
-                          collection_name=COLLECTION_IOC_INDEX,
-                          object_key=f"known_{ioc_type}",
-                          body={"iocs": list(known_iocs)},
-                          headers=headers)
-
-        new_count = len(known_iocs) - original_size
-        logger.info(f"Updated {ioc_type} IOC index: +{len(new_iocs)} new, "
-                   f"{new_count} net additions, {len(known_iocs)} total")
-
-    except Exception as e:
-        logger.error(f"Failed to update IOC index for {ioc_type}: {str(e)}")
-
-
-def filter_known_iocs(iocs: List[Dict], known_iocs_by_type: Dict[str, set], logger) -> tuple:
-    """Filter out IOCs that are already known using smart deduplication
-
-    Returns:
-        tuple: (filtered_iocs, duplicate_rate) where duplicate_rate is percentage
-    """
-    if not known_iocs_by_type:
-        logger.info("No IOC index available, processing all IOCs")
-        return iocs, 0.0
-
-    filtered_iocs = []
-    stats = {'total': len(iocs), 'filtered_out': 0, 'by_type': {}}
-
-    for ioc in iocs:
-        ioc_type = ioc.get('itype', '').lower()
-        ioc_value = ioc.get('value', '')
-
-        if ioc_type in known_iocs_by_type and ioc_value in known_iocs_by_type[ioc_type]:
-            # Skip known IOC
-            stats['filtered_out'] += 1
-            stats['by_type'][ioc_type] = stats['by_type'].get(ioc_type, 0) + 1
-        else:
-            # Keep new IOC
-            filtered_iocs.append(ioc)
-
-    duplicate_rate = (stats['filtered_out'] / stats['total']) * 100 if stats['total'] > 0 else 0
-    logger.info(f"Smart deduplication: {stats['filtered_out']}/{stats['total']} IOCs filtered "
-               f"({duplicate_rate:.1f}% duplicates), processing {len(filtered_iocs)} new IOCs")
-
-    if stats['by_type']:
-        type_breakdown = ', '.join([f"{t}:{c}" for t, c in stats['by_type'].items()])
-        logger.info(f"Duplicates by type: {type_breakdown}")
-
-    return filtered_iocs, duplicate_rate
 
 
 def fetch_iocs_from_anomali(
@@ -1280,9 +1167,6 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                         "clearing update_ids for these types"
                     )
 
-                    # Clear IOC index to prevent false duplicates during recovery
-                    clear_ioc_index_for_recovery(api_client, headers, logger)
-
                     for missing_file in missing_files:
                         # Extract type from filename (remove prefix and suffix)
                         filename_base = missing_file.replace(
@@ -1380,79 +1264,6 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
             logger.info(f"Fetched {len(iocs)} IOCs from Anomali")
 
-            # Smart deduplication: temporarily disabled to fix false duplicate detection
-            duplicate_rate = 0.0
-            if False:  # Temporarily disabled - smart deduplication causing false duplicates
-                # Determine if we should apply aggressive deduplication based on actual recovery scenarios
-                should_apply_smart_dedup = False
-
-                # Strategy 1: Check if this is a recovery scenario (missing files detected earlier)
-                missing_files = []
-                for ioc_type in IOC_TYPE_MAPPINGS.keys():
-                    expected_filename = f"anomali_threatstream_{ioc_type}.csv"
-                    if expected_filename not in existing_files:
-                        missing_files.append(ioc_type)
-
-                # Strategy 2: Check if we're in deep processing (suggesting first run or recovery)
-                current_update_id = int(next_token) if next_token.isdigit() else 0
-                total_count = meta.get("total_count", 0)
-
-                # Strategy 3: Check if this is likely a fresh start (low update_id with high total_count)
-                is_fresh_start = current_update_id < 100000 and total_count > 50000
-
-                # Apply smart deduplication if:
-                # 1. Missing files detected (recovery scenario)
-                # 2. Fresh start with large dataset
-                # 3. Deep processing (very high update_id)
-                if missing_files:
-                    should_apply_smart_dedup = True
-                    logger.info(
-                        f"Missing files recovery scenario (missing: {missing_files}) - "
-                        "enabling smart deduplication"
-                    )
-                elif is_fresh_start:
-                    should_apply_smart_dedup = True
-                    logger.info(
-                        f"Fresh start scenario (update_id: {current_update_id:,}, "
-                        f"total: {total_count:,}) - enabling smart deduplication"
-                    )
-                elif current_update_id > 5000000:  # Very deep processing
-                    should_apply_smart_dedup = True
-                    logger.info(
-                        f"Deep processing scenario (update_id: {current_update_id:,}) - "
-                        "enabling smart deduplication"
-                    )
-                else:
-                    logger.info(
-                        f"Standard incremental sync (update_id: {current_update_id:,}, "
-                        f"total: {total_count:,}, files: {len(existing_files)}) - "
-                        "using CSV-based deduplication"
-                    )
-
-                if should_apply_smart_dedup:
-                    logger.info("Applying smart deduplication to filter known IOCs")
-
-                    # Load known IOCs index for all types present in this batch
-                    known_iocs_by_type = {}
-                    ioc_types_in_batch = set(ioc.get('itype', '').lower() for ioc in iocs)
-
-                    for ioc_type in ioc_types_in_batch:
-                        if ioc_type in IOC_TYPE_MAPPINGS:
-                            known_iocs_by_type[ioc_type] = get_known_iocs_for_type(
-                                api_client, headers, ioc_type, logger)
-
-                    # Filter out known IOCs
-                    original_count = len(iocs)
-                    iocs, duplicate_rate = filter_known_iocs(iocs, known_iocs_by_type, logger)
-
-                    filtered_count = original_count - len(iocs)
-                    logger.info(f"Smart deduplication filtered {filtered_count}/{original_count} known IOCs "
-                               f"({duplicate_rate:.1f}% duplicates)")
-                else:
-                    logger.info("Using standard CSV-based deduplication for incremental sync")
-            else:
-                logger.info("Skipping smart deduplication for initial call")
-
             if not iocs:
                 # Mark job as completed even with no data (if job exists)
                 if job:
@@ -1513,14 +1324,6 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
                 # Save state for the appropriate type (single type or all types)
                 save_update_id(api_client, headers, update_data, type_filter, logger)
-
-                # Update IOC index for smart deduplication - DISABLED
-                # Smart deduplication temporarily disabled to fix false duplicate issues
-                if False:
-                    # Placeholder for future smart deduplication index updates
-                    logger.info("Smart deduplication index update disabled")
-                else:
-                    logger.info("Skipping IOC index update (no new unique data)")
 
             # Mark job as completed (if job exists)
             if job:
