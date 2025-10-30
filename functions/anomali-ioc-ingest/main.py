@@ -80,43 +80,43 @@ class JobError(AnomaliFunctionError):
 IOC_TYPE_MAPPINGS = {
     "ip": {
         "columns": [
-            'destination.ip', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
+            "destination.ip", "confidence", "threat_type", "source", "tags", 'expiration_ts'
         ],
         "primary_field": 'ip'
     },
     "domain": {
         "columns": [
-            'dns.domain.name', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
+            "dns.domain.name", "confidence", "threat_type", "source", "tags", 'expiration_ts'
         ],
         "primary_field": 'value'
     },
     "url": {
         "columns": [
-            'url.original', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
+            "url.original", "confidence", "threat_type", "source", "tags", 'expiration_ts'
         ],
         "primary_field": 'value'
     },
     "email": {
         "columns": [
-            'email.sender.address', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
+            "email.sender.address", "confidence", "threat_type", "source", "tags", 'expiration_ts'
         ],
         "primary_field": 'value'
     },
-    'hash_md5': {
+    "hash_md5": {
         "columns": [
-            'file.hash.md5', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
+            "file.hash.md5", "confidence", "threat_type", "source", "tags", 'expiration_ts'
         ],
         "primary_field": 'value'
     },
-    'hash_sha1': {
+    "hash_sha1": {
         "columns": [
-            'file.hash.sha1', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
+            "file.hash.sha1", "confidence", "threat_type", "source", "tags", 'expiration_ts'
         ],
         "primary_field": 'value'
     },
-    'hash_sha256': {
+    "hash_sha256": {
         "columns": [
-            'file.hash.sha256', 'confidence', 'threat_type', 'source', 'tags', 'expiration_ts'
+            "file.hash.sha256", "confidence", "threat_type", "source", "tags", 'expiration_ts'
         ],
         "primary_field": 'value'
     }
@@ -501,7 +501,7 @@ def download_existing_lookup_files_locally(
             try:
                 if os.path.exists(file_path):
                     logger.info(f"TEST MODE: Reading existing lookup file: {filename}")
-                    with open(file_path, 'r', encoding='utf-8') as f:
+                    with open(file_path, "r", encoding='utf-8') as f:
                         file_content = f.read()
                     existing_files[filename] = file_content
                     file_size = len(file_content)
@@ -606,7 +606,7 @@ def clear_collection_data(
         # Clear the main update tracker and all type-specific trackers
         update_keys = [KEY_LAST_UPDATE]  # Main tracker
         # Add type-specific trackers
-        for ioc_type in ['ip', 'domain', 'url', 'email', 'hash']:
+        for ioc_type in ["ip", "domain", "url", "email", "hash"]:
             update_keys.append(f"{KEY_LAST_UPDATE}_{ioc_type}")
 
         for key in update_keys:
@@ -689,19 +689,19 @@ def process_iocs_to_csv(
         ioc_type = ioc.get("itype", 'unknown')
 
         # Map some common variations to standardized types
-        if ioc_type in ['mal_ip', 'c2_ip', 'apt_ip']:
+        if ioc_type in ["mal_ip", "c2_ip", "apt_ip"]:
             ioc_type = 'ip'
-        elif ioc_type in ['mal_domain', 'c2_domain', 'apt_domain']:
+        elif ioc_type in ["mal_domain", "c2_domain", "apt_domain"]:
             ioc_type = 'domain'
-        elif ioc_type in ['mal_url', 'apt_url']:
+        elif ioc_type in ["mal_url", "apt_url"]:
             ioc_type = 'url'
-        elif ioc_type in ['apt_email', 'mal_email']:
+        elif ioc_type in ["apt_email", "mal_email"]:
             ioc_type = 'email'
-        elif ioc_type in ['apt_md5', 'mal_md5']:
+        elif ioc_type in ["apt_md5", "mal_md5"]:
             ioc_type = 'hash_md5'
-        elif ioc_type in ['apt_sha1', 'mal_sha1']:
+        elif ioc_type in ["apt_sha1", "mal_sha1"]:
             ioc_type = 'hash_sha1'
-        elif ioc_type in ['apt_sha256', 'mal_sha256']:
+        elif ioc_type in ["apt_sha256", "mal_sha256"]:
             ioc_type = 'hash_sha256'
 
         if ioc_type not in iocs_by_type:
@@ -747,11 +747,11 @@ def process_iocs_to_csv(
             # Extract tags as comma-separated string
             tags = []
             if 'tags' in ioc and isinstance(ioc["tags"], list):
-                tags = [tag.get('name', '') for tag in ioc["tags"] if tag.get('name')]
+                tags = [tag.get("name", '') for tag in ioc["tags"] if tag.get('name')]
             tags_str = ','.join(tags) if tags else ''
 
             row = [
-                ioc.get(mapping['primary_field'], ''),  # Primary IOC value
+                ioc.get(mapping["primary_field"], ''),  # Primary IOC value
                 str(ioc.get("confidence", '')),  # Convert to string
                 ioc.get("threat_type", ''),
                 ioc.get("source", ''),
@@ -762,7 +762,7 @@ def process_iocs_to_csv(
 
         if new_rows:
             # Create DataFrame from new data
-            new_df = pd.DataFrame(new_rows, columns=mapping['columns'])
+            new_df = pd.DataFrame(new_rows, columns=mapping["columns"])
 
             # Combine with existing data if available
             if existing_df is not None:
@@ -787,7 +787,7 @@ def process_iocs_to_csv(
                 # - APT attribution tracking as intelligence develops
                 # - Reducing false positives through updated threat types
                 #
-                primary_col = mapping['columns'][0]
+                primary_col = mapping["columns"][0]
                 before_dedup = len(combined_df)
                 combined_df = combined_df.drop_duplicates(subset=[primary_col], keep='last')
                 duplicates_removed = before_dedup - len(combined_df)
@@ -795,10 +795,10 @@ def process_iocs_to_csv(
 
                 # Track statistics
                 new_unique_records = final_size - original_size
-                stats['total_duplicates_removed'] += duplicates_removed
+                stats["total_duplicates_removed"] += duplicates_removed
 
                 if new_unique_records > 0:
-                    stats['files_with_new_data'] += 1
+                    stats["files_with_new_data"] += 1
                     logger.info(f"Added {new_unique_records} new unique records to {filename}")
                 else:
                     logger.info(f"No new unique records added to {filename} (all {len(new_df)} were duplicates)")
@@ -812,7 +812,7 @@ def process_iocs_to_csv(
                 )
             else:
                 combined_df = new_df
-                stats['files_with_new_data'] += 1
+                stats["files_with_new_data"] += 1
                 logger.info(f"Created new {filename} with {len(combined_df)} records")
 
             # Ensure empty strings remain as empty strings, not NaN
@@ -1024,14 +1024,14 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
         # Allow manual parameter overrides for initial calls only
         if request_body:
             if 'modified_ts_gt' in request_body:
-                query_params['modified_ts__gt'] = request_body['modified_ts_gt']
+                query_params["modified_ts__gt"] = request_body["modified_ts_gt"]
                 logger.info("INITIAL: Manual modified_ts_gt override applied")
             if 'modified_ts_lt' in request_body:
-                query_params['modified_ts__lt'] = request_body['modified_ts_lt']
+                query_params["modified_ts__lt"] = request_body["modified_ts_lt"]
                 logger.info("INITIAL: Manual modified_ts_lt override applied")
             if 'update_id_gt' in request_body:
                 old_value = query_params.get('update_id__gt')
-                query_params["update_id__gt"] = request_body['update_id_gt']
+                query_params["update_id__gt"] = request_body["update_id_gt"]
                 logger.info(
                     f"INITIAL: Manual override changed update_id__gt from "
                     f"{old_value} to {query_params['update_id__gt']}"
@@ -1040,12 +1040,12 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
     # Add trusted circles filtering if provided (works for both initial and pagination)
     if trustedcircles:
         logger.info(f"Filtering by trusted circles: {trustedcircles}")
-        query_params['trustedcircles'] = trustedcircles
+        query_params["trustedcircles"] = trustedcircles
 
     # Add feed_id filtering if provided (works for both initial and pagination)
     if feed_id:
         logger.info(f"Filtering by feed_id: {feed_id}")
-        query_params['feed_id'] = feed_id
+        query_params["feed_id"] = feed_id
 
     return query_params
 
@@ -1064,7 +1064,7 @@ def extract_next_token_from_meta(meta, iocs, logger):
 
             # Try search_after first (the actual next boundary), then fallback to others
             if 'search_after' in query_params_parsed:
-                next_token = query_params_parsed['search_after'][0]
+                next_token = query_params_parsed["search_after"][0]
                 logger.info(
                     f"More data available - next pagination token (search_after): {next_token}"
                 )
@@ -1074,7 +1074,7 @@ def extract_next_token_from_meta(meta, iocs, logger):
                     f"More data available - next pagination token (update_id__gt): {next_token}"
                 )
             elif 'from_update_id' in query_params_parsed:
-                next_token = query_params_parsed['from_update_id'][0]
+                next_token = query_params_parsed["from_update_id"][0]
                 logger.info(
                     f"More data available - next pagination token (from_update_id): {next_token}"
                 )
@@ -1185,7 +1185,7 @@ def check_and_recover_missing_files(
     return should_start_fresh, existing_files
 
 
-@FUNC.handler(method='POST', path='/ingest')
+@FUNC.handler(method="POST", path='/ingest')
 def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logger) -> Response:
     """
     Main handler for IOC ingestion from Anomali ThreatStream.
@@ -1217,12 +1217,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
     try:
         # Parse request parameters
-        repository = request.body.get('repository', 'search-all').strip()
+        repository = request.body.get("repository", 'search-all').strip()
         status_filter = request.body.get("status", None)  # No default status filter - get all IOCs
         trustedcircles = request.body.get("trustedcircles", None)  # Feed ID filtering
         feed_id = request.body.get("feed_id", None)  # Feed ID filtering (alternative parameter)
         next_token = request.body.get("next", None)  # Workflow pagination continuation
-        limit = request.body.get('limit', 1000)  # Number of records per API call
+        limit = request.body.get("limit", 1000)  # Number of records per API call
 
         # Parse type filter - only support single type or no type
         type_filter = request.body.get("type", None)  # Single IOC type filter
