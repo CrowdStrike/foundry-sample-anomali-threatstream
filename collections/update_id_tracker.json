@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Update ID Tracker",
+  "description": "Tracks the last update_id from Anomali ThreatStream API for incremental sync",
+  "properties": {
+    "created_timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp when this tracker was created"
+    },
+    "total_count": {
+      "type": "integer",
+      "description": "Total count of IOCs from last API response"
+    },
+    "next_url": {
+      "type": "string",
+      "description": "Next page URL from API response"
+    },
+    "update_id": {
+      "type": "string",
+      "description": "Last update_id processed from Anomali API"
+    }
+  },
+  "required": ["created_timestamp", "update_id"],
+  "additionalProperties": false
+}
