@@ -19,6 +19,8 @@ ignored:
     - .*/\.pytest_cache/.*
     - \.coverage$
     - .*/test_.*\.py$
+    - e2e
+    - e2e/.+
 ui:
     homepage: ""
     extensions: []
