@@ -1525,6 +1525,85 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertEqual(result["limit"], 1000)
         self.assertEqual(result["order_by"], "update_id")
 
+    def test_build_query_params_with_confidence_filters(self):
+        """Test build_query_params with confidence filtering parameters."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        # Create a job with stored parameters
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "update_id__gt": "12345",
+                "status": "active",
+                "type": "ip"
+            }
+        }
+
+        # Test with all confidence filters
+        result = main.build_query_params(
+            None, "active", "ip", 1000, mock_api_client, mock_headers, mock_logger, job,
+            confidence_gt=50, confidence_gte=60, confidence_lt=90, confidence_lte=95
+        )
+
+        # Should include confidence filtering parameters
+        self.assertEqual(result["confidence__gt"], 50)
+        self.assertEqual(result["confidence__gte"], 60)
+        self.assertEqual(result["confidence__lt"], 90)
+        self.assertEqual(result["confidence__lte"], 95)
+
+    def test_build_query_params_with_partial_confidence_filters(self):
+        """Test build_query_params with only some confidence filters."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "update_id__gt": "12345",
+                "status": "active"
+            }
+        }
+
+        # Test with only confidence_gte filter
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            confidence_gte=70
+        )
+
+        # Should include only the specified confidence filter
+        self.assertEqual(result["confidence__gte"], 70)
+        self.assertNotIn("confidence__gt", result)
+        self.assertNotIn("confidence__lt", result)
+        self.assertNotIn("confidence__lte", result)
+
+    def test_build_query_params_no_confidence_filters(self):
+        """Test build_query_params without confidence filters (default behavior)."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "update_id__gt": "12345",
+                "status": "active"
+            }
+        }
+
+        # Test without any confidence filters
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job
+        )
+
+        # Should not include confidence filtering parameters
+        self.assertNotIn("confidence__gt", result)
+        self.assertNotIn("confidence__gte", result)
+        self.assertNotIn("confidence__lt", result)
+        self.assertNotIn("confidence__lte", result)
+
     def test_download_existing_lookup_files_unexpected_response(self):
         """Test download_existing_lookup_files with unexpected response types."""
         mock_logger = MagicMock()

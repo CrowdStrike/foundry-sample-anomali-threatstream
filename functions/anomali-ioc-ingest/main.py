@@ -948,7 +948,8 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
     return results
 
 def build_query_params(next_token, status_filter, type_filter, limit, api_client, headers, logger,
-                       job=None, request_body=None, trustedcircles=None, feed_id=None):
+                       job=None, request_body=None, trustedcircles=None, feed_id=None,
+                       confidence_gt=None, confidence_gte=None, confidence_lt=None, confidence_lte=None):
     """Build query parameters for Anomali API call.
 
     Args:
@@ -963,6 +964,10 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
         request_body: Request body for manual overrides
         trustedcircles: Trusted circles filter
         feed_id: Feed ID filter
+        confidence_gt: Filter by confidence score greater than
+        confidence_gte: Filter by confidence score greater than or equal to
+        confidence_lt: Filter by confidence score less than
+        confidence_lte: Filter by confidence score less than or equal to
     """
     # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument,too-many-locals
     if next_token:
@@ -1046,6 +1051,20 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
     if feed_id:
         logger.info(f"Filtering by feed_id: {feed_id}")
         query_params["feed_id"] = feed_id
+
+    # Add confidence filtering if provided (works for both initial and pagination)
+    if confidence_gt is not None:
+        logger.info(f"Filtering by confidence__gt: {confidence_gt}")
+        query_params["confidence__gt"] = confidence_gt
+    if confidence_gte is not None:
+        logger.info(f"Filtering by confidence__gte: {confidence_gte}")
+        query_params["confidence__gte"] = confidence_gte
+    if confidence_lt is not None:
+        logger.info(f"Filtering by confidence__lt: {confidence_lt}")
+        query_params["confidence__lt"] = confidence_lt
+    if confidence_lte is not None:
+        logger.info(f"Filtering by confidence__lte: {confidence_lte}")
+        query_params["confidence__lte"] = confidence_lte
 
     return query_params
 
@@ -1224,6 +1243,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         next_token = request.body.get("next", None)  # Workflow pagination continuation
         limit = request.body.get("limit", 1000)  # Number of records per API call
 
+        # Parse confidence filters
+        confidence_gt = request.body.get("confidence_gt", None)
+        confidence_gte = request.body.get("confidence_gte", None)
+        confidence_lt = request.body.get("confidence_lt", None)
+        confidence_lte = request.body.get("confidence_lte", None)
+
         # Parse type filter - only support single type or no type
         type_filter = request.body.get("type", None)  # Single IOC type filter
         if type_filter and ',' in str(type_filter):
@@ -1282,7 +1307,9 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
             query_params = build_query_params(
                 next_token, status_filter, type_filter, limit, api_client, headers, logger, job,
-                request_body=request.body, trustedcircles=trustedcircles, feed_id=feed_id
+                request_body=request.body, trustedcircles=trustedcircles, feed_id=feed_id,
+                confidence_gt=confidence_gt, confidence_gte=confidence_gte,
+                confidence_lt=confidence_lt, confidence_lte=confidence_lte
             )
 
             logger.info(f"Final query_params before API call: {query_params}")
