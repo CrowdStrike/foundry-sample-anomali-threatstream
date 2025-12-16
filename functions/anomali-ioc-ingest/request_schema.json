@@ -41,6 +41,30 @@
       "type": "string",
       "description": "Update ID greater than"
     },
+    "confidence_gt": {
+      "type": "integer",
+      "description": "Filter by confidence score greater than",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confidence_gte": {
+      "type": "integer",
+      "description": "Filter by confidence score greater than or equal to",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confidence_lt": {
+      "type": "integer",
+      "description": "Filter by confidence score less than",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confidence_lte": {
+      "type": "integer",
+      "description": "Filter by confidence score less than or equal to",
+      "minimum": 0,
+      "maximum": 100
+    },
     "limit": {
       "type": "integer",
       "description": "Number of records to fetch per API call (default: 1000, max: 1000)",
