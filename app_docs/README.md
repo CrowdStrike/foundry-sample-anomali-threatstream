@@ -35,6 +35,10 @@ Provides automated threat intelligence ingestion from Anomali ThreatStream APIs 
 - `feed_id`: Comma-separated Anomali feed IDs to filter ingestion (e.g., "0368,1390")
 - `type`: IOC type filter for selective ingestion (options: "ip", "domain", "url", "email", "hash", "md5", "sha1", "sha256")
 - `limit`: Number of records per API call (default: 1000, max: 1000)
+- `confidence_gt`: Filter IOCs with confidence score greater than specified value (0-100)
+- `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100)
+- `confidence_lt`: Filter IOCs with confidence score less than specified value (0-100)
+- `confidence_lte`: Filter IOCs with confidence score less than or equal to specified value (0-100)
 
 ### Filtering by Feed ID
 
@@ -89,6 +93,79 @@ loops:
 After editing the YAML, redeploy the app using `foundry apps deploy`.
 
 **Finding Feed IDs**: Log into the [Anomali ThreatStream platform](https://ui.threatstream.com) and navigate to **Manage > Feeds** in the left sidebar to view your available feeds and their IDs.
+
+### Filtering by Confidence Score
+
+To ingest only IOCs that meet specific confidence thresholds, you can configure confidence filtering parameters in the workflow. Confidence scores in Anomali ThreatStream range from 0 to 100, where higher values indicate greater certainty that the indicator is malicious.
+
+Available confidence parameters:
+- `confidence_gt`: Filter IOCs with confidence score **greater than** specified value
+- `confidence_gte`: Filter IOCs with confidence score **greater than or equal to** specified value
+- `confidence_lt`: Filter IOCs with confidence score **less than** specified value
+- `confidence_lte`: Filter IOCs with confidence score **less than or equal to** specified value
+
+#### Option 1: Edit Workflow via Foundry UI (Recommended)
+
+1. **Navigate to App Manager**: Go to **Foundry > App manager**
+2. **Open App Builder**: Find your app, click the three-dot menu, and select **Edit app**
+3. **Access Logic Section**: In the left sidebar, click the **Logic** icon (lightbulb)
+4. **Edit Workflow**: Click on **Anomali Threat Intelligence Ingest** workflow
+5. **Configure First Action**:
+   - Click on the **Anomali Ingest** action card
+   - Add a confidence filter field (e.g., `confidence_gte: 70` for high-confidence IOCs only)
+6. **Configure Loop Action**:
+   - Click on the **Anomali Ingest - 2** action card
+   - Add the same confidence filter value
+   - Ensure this matches the first action for consistent filtering
+7. **Save Changes**: Click **Save and exit** in the top right
+
+**Important**: Both `Anomali Ingest` and `Anomali Ingest - 2` actions must use the same confidence filter values to ensure consistent filtering throughout pagination.
+
+#### Option 2: Edit Workflow YAML Directly
+
+Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
+
+```yaml
+actions:
+    AnomaliIngest:
+        properties:
+            confidence_gte: 70  # Only ingest IOCs with confidence >= 70
+            limit: 1000
+            repository: search-all
+            status: active
+```
+
+Also update the loop action with the same confidence filter:
+
+```yaml
+loops:
+    Loop:
+        actions:
+            AnomaliIngest2:
+                properties:
+                    confidence_gte: 70  # Must match AnomaliIngest confidence filter
+                    limit: 1000
+                    next: ${data['WorkflowCustomVariable.next']}
+                    repository: search-all
+                    status: active
+```
+
+You can combine multiple confidence filters for range-based filtering:
+
+```yaml
+actions:
+    AnomaliIngest:
+        properties:
+            confidence_gte: 50   # Minimum confidence of 50
+            confidence_lt: 90    # Maximum confidence below 90
+            limit: 1000
+            repository: search-all
+            status: active
+```
+
+After editing the YAML, redeploy the app using `foundry apps deploy`.
+
+**Understanding Confidence Scores**: Anomali ThreatStream assigns confidence scores based on multiple factors including source reliability, corroboration from multiple feeds, and historical accuracy. A score of 70+ generally indicates high-confidence threat intelligence suitable for automated blocking, while scores below 50 may require additional investigation before taking action.
 
 ## Data Output
 
