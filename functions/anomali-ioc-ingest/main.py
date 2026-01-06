@@ -55,7 +55,6 @@ from urllib.parse import urlparse, parse_qs
 
 from crowdstrike.foundry.function import Function, Request, Response, APIError
 from falconpy import APIIntegrations, NGSIEM, APIHarnessV2
-import pandas as pd
 
 
 FUNC = Function.instance()
@@ -654,14 +653,15 @@ def clear_update_id_for_type(
 def process_iocs_to_csv(
     iocs: List[Dict], temp_dir: str, existing_files: Dict[str, str], logger: Logger
 ) -> tuple[List[str], Dict[str, int]]:
-    """Process IOCs and create CSV files by type with intelligent threat intelligence deduplication
+    """Process IOCs and create CSV files by type with deduplication.
 
-    Features advanced temporal precedence deduplication that preserves the most recent threat
-    intelligence data for each IOC. This ensures security analysts receive current confidence
-    scores, threat classifications, and APT attribution rather than outdated intelligence.
+    Implements STIX 2.1 compliant temporal precedence deduplication that preserves
+    the most recent threat intelligence data for each IOC. This ensures security
+    analysts receive current confidence scores, threat classifications, and APT
+    attribution rather than outdated intelligence.
 
     Deduplication Logic:
-    - Implements STIX 2.1 compliant temporal precedence
+    - New IOCs override existing ones with the same primary key
     - Preserves latest IOC confidence scores and threat types
     - Supports IOC evolution tracking (suspicious -> malware -> APT)
     - Critical for accurate threat hunting and incident response
@@ -681,7 +681,12 @@ def process_iocs_to_csv(
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals
 
     logger.info(f"Processing {len(iocs)} IOCs into CSV files")
-    logger.info(f"Found {len(existing_files)} existing lookup files to append to")
+    logger.info(f"Found {len(existing_files)} existing lookup files to merge with")
+
+    # Log memory diagnostics for existing files
+    for filename, content in existing_files.items():
+        content_size_mb = len(content) / (1024 * 1024)
+        logger.info(f"Existing file {filename}: {content_size_mb:.2f} MB in memory")
 
     # Group IOCs by type
     iocs_by_type = {}
@@ -726,23 +731,13 @@ def process_iocs_to_csv(
         filename = f"anomali_threatstream_{ioc_type}.csv"
         filepath = os.path.join(temp_dir, filename)
 
-        # Check if we have existing data to append to
+        # Check if we have existing data to merge with
         existing_data = existing_files.get(filename, "")
-        existing_df = None
         original_size = 0
 
-        if existing_data:
-            try:
-                # Parse existing CSV data
-                existing_df = pd.read_csv(StringIO(existing_data))
-                original_size = len(existing_df)
-                logger.info(f"Found existing {filename} with {original_size} records")
-            except Exception as e:
-                logger.warning(f"Could not parse existing {filename}: {str(e)}, starting fresh")
-                existing_df = None
-
-        # Process new IOCs
-        new_rows = []
+        # Build a dict of new IOCs keyed by primary field for deduplication
+        # New IOCs override existing ones (STIX 2.1 temporal precedence)
+        new_iocs_dict = {}
         for ioc in type_iocs:
             # Extract tags as comma-separated string
             tags = []
@@ -750,77 +745,77 @@ def process_iocs_to_csv(
                 tags = [tag.get("name", '') for tag in ioc["tags"] if tag.get('name')]
             tags_str = ",".join(tags) if tags else ""
 
-            row = [
-                ioc.get(mapping["primary_field"], ''),  # Primary IOC value
-                str(ioc.get("confidence", '')),  # Convert to string
-                ioc.get("threat_type", ''),
-                ioc.get("source", ''),
-                tags_str,
-                ioc.get("expiration_ts", '')
-            ]
-            new_rows.append(row)
+            primary_value = ioc.get(mapping["primary_field"], '')
+            if primary_value:  # Only add if we have a valid primary key
+                new_iocs_dict[primary_value] = [
+                    primary_value,
+                    str(ioc.get("confidence", '')),
+                    ioc.get("threat_type", ''),
+                    ioc.get("source", ''),
+                    tags_str,
+                    ioc.get("expiration_ts", '')
+                ]
 
-        if new_rows:
-            # Create DataFrame from new data
-            new_df = pd.DataFrame(new_rows, columns=mapping["columns"])
+        if not new_iocs_dict and not existing_data:
+            logger.info(f"No valid IOCs for {ioc_type}, skipping")
+            continue
 
-            # Combine with existing data if available
-            if existing_df is not None:
-                # Append new data to existing data
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        # Stream through existing file and write output with deduplication
+        duplicates_updated = 0
+        new_unique_added = 0
+        written_keys = set()
 
-                # Temporal Precedence Deduplication for Threat Intelligence
-                #
-                # This implements STIX 2.1 compliant deduplication that preserves the most
-                # recent threat intelligence data for each IOC. When the same IOC appears
-                # multiple times (from different time periods or sources), we retain the
-                # latest occurrence to ensure analysts get current threat classifications.
-                #
-                # Example IOC Evolution:
-                # - Week 1: 192.168.1.1, confidence=40, type="suspicious", tags="investigation"
-                # - Week 4: 192.168.1.1, confidence=95, type="c2,apt", tags="investigation,confirmed,apt29"
-                # - Result: Analysts receive Week 4 data with high confidence and APT attribution
-                #
-                # This approach is critical for:
-                # - Threat hunting with current confidence scores
-                # - Incident response based on latest threat classifications
-                # - APT attribution tracking as intelligence develops
-                # - Reducing false positives through updated threat types
-                #
-                primary_col = mapping["columns"][0]
-                before_dedup = len(combined_df)
-                combined_df = combined_df.drop_duplicates(subset=[primary_col], keep="last")
-                duplicates_removed = before_dedup - len(combined_df)
-                final_size = len(combined_df)
+        with open(filepath, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
+            writer.writerow(mapping["columns"])  # Write header
 
-                # Track statistics
-                new_unique_records = final_size - original_size
-                stats["total_duplicates_removed"] += duplicates_removed
+            if existing_data:
+                # Stream through existing data line by line
+                reader = csv.reader(StringIO(existing_data))
+                header = next(reader, None)  # Skip header
 
-                if new_unique_records > 0:
-                    stats["files_with_new_data"] += 1
-                    logger.info(f"Added {new_unique_records} new unique records to {filename}")
-                else:
-                    logger.info(f"No new unique records added to {filename} (all {len(new_df)} were duplicates)")
+                if header:
+                    for row in reader:
+                        original_size += 1
+                        if len(row) > 0:
+                            primary_key = row[0]
 
-                if duplicates_removed > 0:
-                    logger.info(f"Removed {duplicates_removed} duplicate IOCs, preserving existing entries")
+                            # Check if this IOC has an update in new data
+                            # (temporal precedence: new data wins)
+                            if primary_key in new_iocs_dict:
+                                # Write the new (updated) version instead
+                                writer.writerow(new_iocs_dict[primary_key])
+                                written_keys.add(primary_key)
+                                duplicates_updated += 1
+                            else:
+                                # Keep existing row as-is
+                                writer.writerow(row)
+                                written_keys.add(primary_key)
 
-                logger.info(
-                    f"Combined {original_size} existing + {len(new_df)} new = "
-                    f"{final_size} total records for {filename} ({new_unique_records} net new)"
-                )
-            else:
-                combined_df = new_df
-                stats["files_with_new_data"] += 1
-                logger.info(f"Created new {filename} with {len(combined_df)} records")
+            # Write any new IOCs that weren't updates to existing ones
+            for primary_key, row in new_iocs_dict.items():
+                if primary_key not in written_keys:
+                    writer.writerow(row)
+                    new_unique_added += 1
 
-            # Ensure empty strings remain as empty strings, not NaN
-            combined_df = combined_df.fillna("")
+        # Calculate final statistics
+        final_size = original_size + new_unique_added
+        stats["total_duplicates_removed"] += duplicates_updated
 
-            # Save to CSV
-            combined_df.to_csv(filepath, index=False, quoting=csv.QUOTE_ALL, encoding="utf-8")
-            created_files.append(filepath)
+        if new_unique_added > 0 or duplicates_updated > 0:
+            stats["files_with_new_data"] += 1
+
+        if new_unique_added > 0:
+            logger.info(f"Added {new_unique_added} new unique records to {filename}")
+        if duplicates_updated > 0:
+            logger.info(f"Updated {duplicates_updated} existing records with newer data in {filename}")
+
+        logger.info(
+            f"Processed {filename}: {original_size} existing + {new_unique_added} new = "
+            f"{final_size} total records ({duplicates_updated} updated)"
+        )
+
+        created_files.append(filepath)
 
     return created_files, stats
 
@@ -891,36 +886,32 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
             # Log the raw response for troubleshooting
             logger.info(f"NGSIEM upload response for {filename}: {response}")
 
-            # Handle 500 errors that may be successful uploads with empty responses
+            # Handle 500 errors that may be successful uploads with empty response bodies
+            # FalconPy cannot parse empty responses and returns a JSON parsing error
             if response["status_code"] == 500:
                 error_body = response.get("body", {})
                 errors = error_body.get("errors", [])
-
-                # Check for JSON parsing errors that indicate successful upload
                 is_likely_success = False
+
                 if errors:
-                    error_message = str(errors[0].get("message", "")).lower()
+                    # Check if this is a JSON parsing error from empty response body
+                    error_message = str(errors[0].get("message", "") if isinstance(errors[0], dict)
+                                       else errors[0]).lower()
                     is_likely_success = any(phrase in error_message for phrase in [
                         "extra data: line 1 column",
                         "expecting value: line 1 column 1 (char 0)"
                     ])
 
                 if is_likely_success:
-                    logger.info(f"Upload successful for {filename} (recovered from parsing error)")
+                    logger.info(f"Upload likely successful for {filename} (recovered from parsing error)")
                     results.append({
                         "file": filename,
                         "status": "success",
-                        "message": "File uploaded successfully"
+                        "message": "File uploaded successfully (recovered from empty response)"
                     })
-                else:
-                    # Real 500 error
-                    results.append({
-                        "file": filename,
-                        "status": "error",
-                        "message": f"Upload failed: {errors}"
-                    })
-            elif response["status_code"] >= 400:
-                # Other 4xx errors are real failures
+                    continue
+
+            if response["status_code"] >= 400:
                 error_messages = response.get("body", {}).get("errors", [])
                 results.append({
                     "file": filename,
