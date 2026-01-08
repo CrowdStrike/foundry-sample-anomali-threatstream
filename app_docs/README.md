@@ -180,6 +180,55 @@ After editing the YAML, redeploy the app using `foundry apps deploy`.
 
 **Output Format**: CSV lookup files uploaded to Falcon Next-Gen SIEM repository for joining with host data
 
+## File Size Limits
+
+Falcon Next-Gen SIEM has a **200 MB maximum file size** for lookup file uploads. When the connector processes large IOC datasets (e.g., hash IOCs from Anomali ThreatStream), the resulting lookup file may approach or exceed this limit.
+
+### Symptoms
+
+If the lookup file exceeds 200 MB, the workflow will fail with an error message similar to:
+
+```
+File anomali_threatstream_hash_md5.csv (205.3 MB) exceeds the NGSIEM upload limit of 200 MB.
+```
+
+### Solutions
+
+To reduce file size and stay within the 200 MB limit:
+
+1. **Filter by confidence score**: Ingest only high-confidence IOCs that are most actionable
+   ```yaml
+   confidence_gte: 70  # Only IOCs with confidence >= 70
+   ```
+
+2. **Filter by specific feed IDs**: Limit ingestion to your most important threat feeds
+   ```yaml
+   feed_id: "1234,5678"  # Specific feed IDs
+   ```
+
+3. **Filter by IOC type**: Create separate workflows for different IOC types
+   ```yaml
+   type: hash  # Only hash IOCs (or: ip, domain, url, email)
+   ```
+
+4. **Combine filters**: Use multiple filters together for maximum reduction
+   ```yaml
+   type: hash
+   confidence_gte: 75
+   feed_id: "1234"
+   ```
+
+### Recommended Configuration for Large Datasets
+
+For organizations with access to large Anomali ThreatStream datasets (e.g., millions of hash IOCs), we recommend:
+
+1. **Create type-specific workflows**: One workflow per IOC type (IP, domain, hash, etc.)
+2. **Use confidence filtering**: Start with `confidence_gte: 70` and adjust based on your needs
+3. **Monitor file sizes**: Check the `process_stats.file_sizes` field in workflow execution results
+4. **Consider feed prioritization**: Focus on your highest-value threat intelligence feeds
+
+See the [Filtering by Confidence Score](#filtering-by-confidence-score) and [Filtering by Feed ID](#filtering-by-feed-id) sections above for detailed configuration instructions.
+
 ## Monitoring
 
 **Function Logs**: View execution logs in **Advanced Event Search**:

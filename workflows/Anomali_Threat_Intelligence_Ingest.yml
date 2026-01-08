@@ -45,7 +45,7 @@ actions:
         version_constraint: ~1
 loops:
     Loop:
-        display: While next exists And next is not equal to 0; 500 iterations; 2 hour limit
+        display: While next exists And next is not equal to 0
         for:
             input: ""
             condition: WorkflowCustomVariable.next:!null+WorkflowCustomVariable.next:!'0'
@@ -53,8 +53,6 @@ loops:
                 - next exists
                 - next is not equal to 0
             continue_on_partial_execution: false
-            max_execution_seconds: 7200
-            max_iteration_count: 500
             sequential: true
         trigger:
             next:

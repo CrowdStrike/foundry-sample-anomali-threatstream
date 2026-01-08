@@ -40,10 +40,10 @@ Sync Logic:
 """
 # pylint: disable=too-many-lines
 
-import csv
 import json
 import os
 import random
+import shutil
 import tempfile
 import time
 import uuid
@@ -53,9 +53,9 @@ from logging import Logger
 from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse, parse_qs
 
+import polars as pl
 from crowdstrike.foundry.function import Function, Request, Response, APIError
 from falconpy import APIIntegrations, NGSIEM, APIHarnessV2
-import pandas as pd
 
 
 FUNC = Function.instance()
@@ -131,6 +131,16 @@ KEY_LAST_UPDATE = "last_update"
 JOB_RUNNING = "running"
 JOB_COMPLETED = "completed"
 JOB_FAILED = "failed"
+
+# File size limits for NGSIEM lookup file uploads
+# The maximum upload size is 200 MiB (209,715,200 bytes)
+# We use a warning threshold to alert users before hitting the hard limit
+MAX_UPLOAD_SIZE_BYTES = 209715200  # 200 MiB - exact NGSIEM limit
+WARNING_THRESHOLD_BYTES = 180 * 1024 * 1024  # 180 MiB - warn when approaching limit
+
+
+class FileSizeLimitError(AnomaliFunctionError):
+    """Exception raised when a lookup file exceeds or approaches the NGSIEM upload size limit."""
 
 def get_last_update_id(
     api_client: APIHarnessV2, headers: Dict[str, str], ioc_type: Optional[str], logger: Logger
@@ -653,18 +663,21 @@ def clear_update_id_for_type(
 
 def process_iocs_to_csv(
     iocs: List[Dict], temp_dir: str, existing_files: Dict[str, str], logger: Logger
-) -> tuple[List[str], Dict[str, int]]:
-    """Process IOCs and create CSV files by type with intelligent threat intelligence deduplication
+) -> tuple[List[str], Dict[str, Any]]:
+    """Process IOCs and create CSV files by type with deduplication using DataFrames.
 
-    Features advanced temporal precedence deduplication that preserves the most recent threat
-    intelligence data for each IOC. This ensures security analysts receive current confidence
-    scores, threat classifications, and APT attribution rather than outdated intelligence.
+    Implements STIX 2.1 compliant temporal precedence deduplication that preserves
+    the most recent threat intelligence data for each IOC.
+
+    File Size Limits:
+    - Maximum NGSIEM lookup file upload size: 200 MiB (209,715,200 bytes)
+    - Warning threshold: 180 MiB - alerts users when approaching the limit
+    - If file exceeds limit, returns error with recommendation to use filters
 
     Deduplication Logic:
-    - Implements STIX 2.1 compliant temporal precedence
+    - New IOCs override existing ones with the same primary key
     - Preserves latest IOC confidence scores and threat types
     - Supports IOC evolution tracking (suspicious -> malware -> APT)
-    - Critical for accurate threat hunting and incident response
 
     Args:
         iocs: List of IOC dictionaries from Anomali ThreatStream
@@ -673,22 +686,27 @@ def process_iocs_to_csv(
         logger: Logger instance for tracking operations
 
     Returns:
-        tuple: (created_files, stats) where stats contains:
-            - total_new_iocs: Total IOCs processed
-            - total_duplicates_removed: Total duplicates that were filtered out
-            - files_with_new_data: Number of files that had new unique data added
+        tuple: (created_files, stats) where stats contains processing statistics
+
+    Raises:
+        FileSizeLimitError: When resulting file would exceed NGSIEM upload limit
     """
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals
 
     logger.info(f"Processing {len(iocs)} IOCs into CSV files")
-    logger.info(f"Found {len(existing_files)} existing lookup files to append to")
+    logger.info(f"Found {len(existing_files)} existing lookup files to merge with")
+
+    # Log memory diagnostics for existing files
+    for filename, content in existing_files.items():
+        content_size_mb = len(content) / (1024 * 1024)
+        logger.info(f"Existing file {filename}: {content_size_mb:.2f} MB")
 
     # Group IOCs by type
-    iocs_by_type = {}
+    iocs_by_type: Dict[str, List[Dict]] = {}
     for ioc in iocs:
         ioc_type = ioc.get("itype", "unknown")
 
-        # Map some common variations to standardized types
+        # Map common variations to standardized types
         if ioc_type in ["mal_ip", "c2_ip", "apt_ip"]:
             ioc_type = "ip"
         elif ioc_type in ["mal_domain", "c2_domain", "apt_domain"]:
@@ -708,13 +726,15 @@ def process_iocs_to_csv(
             iocs_by_type[ioc_type] = []
         iocs_by_type[ioc_type].append(ioc)
 
-    logger.info(f"IOCs grouped by type: {[(t, len(iocs)) for t, iocs in iocs_by_type.items()]}")
+    logger.info(f"IOCs grouped by type: {[(t, len(v)) for t, v in iocs_by_type.items()]}")
 
     created_files = []
-    stats = {
+    stats: Dict[str, Any] = {
         "total_new_iocs": len(iocs),
         "total_duplicates_removed": 0,
-        "files_with_new_data": 0
+        "files_with_new_data": 0,
+        "file_sizes": {},
+        "warnings": []
     }
 
     for ioc_type, type_iocs in iocs_by_type.items():
@@ -725,23 +745,9 @@ def process_iocs_to_csv(
         mapping = IOC_TYPE_MAPPINGS[ioc_type]
         filename = f"anomali_threatstream_{ioc_type}.csv"
         filepath = os.path.join(temp_dir, filename)
+        primary_col = mapping["columns"][0]  # First column is the primary key
 
-        # Check if we have existing data to append to
-        existing_data = existing_files.get(filename, "")
-        existing_df = None
-        original_size = 0
-
-        if existing_data:
-            try:
-                # Parse existing CSV data
-                existing_df = pd.read_csv(StringIO(existing_data))
-                original_size = len(existing_df)
-                logger.info(f"Found existing {filename} with {original_size} records")
-            except Exception as e:
-                logger.warning(f"Could not parse existing {filename}: {str(e)}, starting fresh")
-                existing_df = None
-
-        # Process new IOCs
+        # Build new IOCs DataFrame
         new_rows = []
         for ioc in type_iocs:
             # Extract tags as comma-separated string
@@ -750,77 +756,132 @@ def process_iocs_to_csv(
                 tags = [tag.get("name", '') for tag in ioc["tags"] if tag.get('name')]
             tags_str = ",".join(tags) if tags else ""
 
-            row = [
-                ioc.get(mapping["primary_field"], ''),  # Primary IOC value
-                str(ioc.get("confidence", '')),  # Convert to string
-                ioc.get("threat_type", ''),
-                ioc.get("source", ''),
-                tags_str,
-                ioc.get("expiration_ts", '')
-            ]
-            new_rows.append(row)
+            primary_value = ioc.get(mapping["primary_field"], '')
+            if primary_value:
+                new_rows.append({
+                    primary_col: str(primary_value),
+                    "confidence": str(ioc.get("confidence", '')),
+                    "threat_type": str(ioc.get("threat_type", '')),
+                    "source": str(ioc.get("source", '')),
+                    "tags": tags_str,
+                    "expiration_ts": str(ioc.get("expiration_ts", ''))
+                })
+
+        # Check if we have existing data
+        existing_data = existing_files.get(filename, "")
+
+        if not new_rows and not existing_data:
+            logger.info(f"No valid IOCs for {ioc_type}, skipping")
+            continue
+
+        # Load existing data and process deduplication using DataFrames
+        original_count = 0
+        duplicates_updated = 0
+        new_unique_added = 0
+
+        if existing_data:
+            # Read existing CSV into DataFrame
+            try:
+                existing_df = pl.read_csv(
+                    StringIO(existing_data),
+                    has_header=True,
+                    infer_schema_length=0  # Read all as strings to preserve data
+                )
+                # Verify the existing file has the expected primary column
+                if primary_col not in existing_df.columns:
+                    logger.warning(
+                        f"Existing file {filename} has incompatible columns "
+                        f"(missing {primary_col}), starting fresh"
+                    )
+                    existing_df = None
+                else:
+                    original_count = len(existing_df)
+                    logger.info(f"Loaded {original_count} existing records from {filename}")
+            except Exception as e:
+                logger.warning(f"Error reading existing file {filename}: {e}, starting fresh")
+                existing_df = None
+        else:
+            existing_df = None
 
         if new_rows:
-            # Create DataFrame from new data
-            new_df = pd.DataFrame(new_rows, columns=mapping["columns"])
+            # Create DataFrame from new IOCs
+            new_df = pl.DataFrame(new_rows)
+            new_df = new_df.select(mapping["columns"])  # Ensure column order
+            logger.info(f"Created DataFrame with {len(new_df)} new IOCs")
+        else:
+            new_df = None
 
-            # Combine with existing data if available
-            if existing_df is not None:
-                # Append new data to existing data
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        # Merge with deduplication (new data takes precedence)
+        if existing_df is not None and new_df is not None:
+            # Find which existing rows will be updated
+            existing_keys = set(existing_df[primary_col].to_list())
+            new_keys = set(new_df[primary_col].to_list())
+            duplicates_updated = len(existing_keys & new_keys)
+            new_unique_added = len(new_keys - existing_keys)
 
-                # Temporal Precedence Deduplication for Threat Intelligence
-                #
-                # This implements STIX 2.1 compliant deduplication that preserves the most
-                # recent threat intelligence data for each IOC. When the same IOC appears
-                # multiple times (from different time periods or sources), we retain the
-                # latest occurrence to ensure analysts get current threat classifications.
-                #
-                # Example IOC Evolution:
-                # - Week 1: 192.168.1.1, confidence=40, type="suspicious", tags="investigation"
-                # - Week 4: 192.168.1.1, confidence=95, type="c2,apt", tags="investigation,confirmed,apt29"
-                # - Result: Analysts receive Week 4 data with high confidence and APT attribution
-                #
-                # This approach is critical for:
-                # - Threat hunting with current confidence scores
-                # - Incident response based on latest threat classifications
-                # - APT attribution tracking as intelligence develops
-                # - Reducing false positives through updated threat types
-                #
-                primary_col = mapping["columns"][0]
-                before_dedup = len(combined_df)
-                combined_df = combined_df.drop_duplicates(subset=[primary_col], keep="last")
-                duplicates_removed = before_dedup - len(combined_df)
-                final_size = len(combined_df)
+            # Anti-join: keep existing rows that don't have updates
+            # Then concatenate with new data
+            merged_df = pl.concat([
+                existing_df.join(new_df.select(primary_col), on=primary_col, how="anti"),
+                new_df
+            ])
+        elif existing_df is not None:
+            merged_df = existing_df
+        elif new_df is not None:
+            merged_df = new_df
+            new_unique_added = len(new_df)
+        else:
+            continue
 
-                # Track statistics
-                new_unique_records = final_size - original_size
-                stats["total_duplicates_removed"] += duplicates_removed
+        # Write to CSV with quoting (matches original behavior)
+        merged_df.write_csv(filepath, quote_style="always")
 
-                if new_unique_records > 0:
-                    stats["files_with_new_data"] += 1
-                    logger.info(f"Added {new_unique_records} new unique records to {filename}")
-                else:
-                    logger.info(f"No new unique records added to {filename} (all {len(new_df)} were duplicates)")
+        # Check file size and enforce limits
+        file_size = os.path.getsize(filepath)
+        file_size_mb = file_size / (1024 * 1024)
+        stats["file_sizes"][filename] = file_size
 
-                if duplicates_removed > 0:
-                    logger.info(f"Removed {duplicates_removed} duplicate IOCs, preserving existing entries")
+        logger.info(f"Created {filename}: {file_size_mb:.2f} MB, {len(merged_df)} records")
 
-                logger.info(
-                    f"Combined {original_size} existing + {len(new_df)} new = "
-                    f"{final_size} total records for {filename} ({new_unique_records} net new)"
-                )
-            else:
-                combined_df = new_df
-                stats["files_with_new_data"] += 1
-                logger.info(f"Created new {filename} with {len(combined_df)} records")
+        # Check for file size limit violations
+        if file_size > MAX_UPLOAD_SIZE_BYTES:
+            error_msg = (
+                f"File {filename} ({file_size_mb:.1f} MB) exceeds the NGSIEM upload limit of 200 MB. "
+                f"The file contains {len(merged_df):,} IOC records. "
+                f"To reduce file size, configure the workflow to use filters: "
+                f"1) Use 'type' parameter to ingest specific IOC types separately, "
+                f"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70), "
+                f"3) Use 'feed_id' to limit ingestion to specific threat feeds. "
+                f"See the app documentation for filter configuration details."
+            )
+            logger.error(error_msg)
+            raise FileSizeLimitError(error_msg)
 
-            # Ensure empty strings remain as empty strings, not NaN
-            combined_df = combined_df.fillna("")
+        # Warn if approaching the limit
+        if file_size > WARNING_THRESHOLD_BYTES:
+            warning_msg = (
+                f"File {filename} ({file_size_mb:.1f} MB) is approaching the 200 MB upload limit. "
+                f"Consider using filters to reduce data volume."
+            )
+            logger.warning(warning_msg)
+            stats["warnings"].append(warning_msg)
 
-            # Save to CSV
-            combined_df.to_csv(filepath, index=False, quoting=csv.QUOTE_ALL, encoding="utf-8")
-            created_files.append(filepath)
+        # Update statistics
+        stats["total_duplicates_removed"] += duplicates_updated
+        if new_unique_added > 0 or duplicates_updated > 0:
+            stats["files_with_new_data"] += 1
+
+        if new_unique_added > 0:
+            logger.info(f"Added {new_unique_added} new unique records to {filename}")
+        if duplicates_updated > 0:
+            logger.info(f"Updated {duplicates_updated} existing records in {filename}")
+
+        logger.info(
+            f"Processed {filename}: {original_count} existing + {new_unique_added} new = "
+            f"{len(merged_df)} total records ({duplicates_updated} updated)"
+        )
+
+        created_files.append(filepath)
 
     return created_files, stats
 
@@ -850,7 +911,6 @@ def upload_csv_files_locally(csv_files: List[str], repository: str, logger: Logg
             target_path = os.path.join(test_dir, filename)
 
             # Copy file to test directory
-            import shutil
             shutil.copy2(csv_file, target_path)
 
             # Get file size for logging
@@ -891,36 +951,32 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
             # Log the raw response for troubleshooting
             logger.info(f"NGSIEM upload response for {filename}: {response}")
 
-            # Handle 500 errors that may be successful uploads with empty responses
+            # Handle 500 errors that may be successful uploads with empty response bodies
+            # FalconPy cannot parse empty responses and returns a JSON parsing error
             if response["status_code"] == 500:
                 error_body = response.get("body", {})
                 errors = error_body.get("errors", [])
-
-                # Check for JSON parsing errors that indicate successful upload
                 is_likely_success = False
+
                 if errors:
-                    error_message = str(errors[0].get("message", "")).lower()
+                    # Check if this is a JSON parsing error from empty response body
+                    error_message = str(errors[0].get("message", "") if isinstance(errors[0], dict)
+                                       else errors[0]).lower()
                     is_likely_success = any(phrase in error_message for phrase in [
                         "extra data: line 1 column",
                         "expecting value: line 1 column 1 (char 0)"
                     ])
 
                 if is_likely_success:
-                    logger.info(f"Upload successful for {filename} (recovered from parsing error)")
+                    logger.info(f"Upload likely successful for {filename} (recovered from parsing error)")
                     results.append({
                         "file": filename,
                         "status": "success",
-                        "message": "File uploaded successfully"
+                        "message": "File uploaded successfully (recovered from empty response)"
                     })
-                else:
-                    # Real 500 error
-                    results.append({
-                        "file": filename,
-                        "status": "error",
-                        "message": f"Upload failed: {errors}"
-                    })
-            elif response["status_code"] >= 400:
-                # Other 4xx errors are real failures
+                    continue
+
+            if response["status_code"] >= 400:
                 error_messages = response.get("body", {}).get("errors", [])
                 results.append({
                     "file": filename,

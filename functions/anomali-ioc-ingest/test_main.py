@@ -1,5 +1,6 @@
 """Test module for the Anomali ThreatStream IOC ingestion function."""
 
+import csv
 import unittest
 import importlib
 from unittest.mock import patch, MagicMock, call
@@ -459,12 +460,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertEqual(stats['files_with_new_data'], 1)
 
             # Verify CSV content
-            import pandas as pd
-            df = pd.read_csv(csv_files[0], keep_default_na=False, dtype=str)
-            self.assertEqual(len(df), 1)
-            self.assertEqual(df.iloc[0]["destination.ip"], "1.2.3.4")
-            self.assertEqual(df.iloc[0]["confidence"], "90")
-            self.assertEqual(df.iloc[0]["tags"], "botnet,c2")
+            with open(csv_files[0], 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["destination.ip"], "1.2.3.4")
+            self.assertEqual(rows[0]["confidence"], "90")
+            self.assertEqual(rows[0]["tags"], "botnet,c2")
 
     def test_process_iocs_to_csv_domain_type(self):
         """Test process_iocs_to_csv with domain IOCs."""
@@ -489,11 +491,12 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertTrue(csv_files[0].endswith("anomali_threatstream_domain.csv"))
 
             # Verify CSV content
-            import pandas as pd
-            df = pd.read_csv(csv_files[0], keep_default_na=False, dtype=str)
-            self.assertEqual(len(df), 1)
-            self.assertEqual(df.iloc[0]["dns.domain.name"], "evil.com")
-            self.assertEqual(df.iloc[0]["tags"], "")
+            with open(csv_files[0], 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["dns.domain.name"], "evil.com")
+            self.assertEqual(rows[0]["tags"], "")
 
     def test_process_iocs_to_csv_itype_mapping(self):
         """Test process_iocs_to_csv with IOC type mapping."""
@@ -969,19 +972,21 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
             self.assertEqual(len(csv_files), 1)
 
-            # Verify merge and deduplication with keep='last' (intelligent deduplication)
-            import pandas as pd
-            df = pd.read_csv(csv_files[0], keep_default_na=False, dtype=str)
-            self.assertEqual(len(df), 2)  # Original + new unique IP
+            # Verify merge and deduplication (temporal precedence: new data wins)
+            with open(csv_files[0], 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            self.assertEqual(len(rows), 2)  # Original + new unique IP
 
-            # Verify latest entry is preserved (keep='last' for threat intelligence evolution)
-            ip_1234_row = df[df["destination.ip"] == "1.2.3.4"]
-            self.assertEqual(ip_1234_row.iloc[0]["confidence"], "90")  # Latest value
-            self.assertEqual(ip_1234_row.iloc[0]["source"], "test")  # Latest value
+            # Build lookup by IP for easier assertions
+            rows_by_ip = {row["destination.ip"]: row for row in rows}
+
+            # Verify latest entry is preserved (temporal precedence)
+            self.assertEqual(rows_by_ip["1.2.3.4"]["confidence"], "90")  # Latest value
+            self.assertEqual(rows_by_ip["1.2.3.4"]["source"], "test")  # Latest value
 
             # Verify new IP was added
-            ip_5678_row = df[df["destination.ip"] == "5.6.7.8"]
-            self.assertEqual(len(ip_5678_row), 1)
+            self.assertIn("5.6.7.8", rows_by_ip)
 
     @patch('main.NGSIEM')
     def test_upload_csv_files_500_error_recovery(self, mock_ngsiem_class):
@@ -1009,7 +1014,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
                 self.assertEqual(len(results), 1)
                 self.assertEqual(results[0]["status"], "success")
-                self.assertEqual(results[0]["message"], "File uploaded successfully")
+                # The message varies based on whether recovery from empty response was triggered
+                self.assertIn("File uploaded successfully", results[0]["message"])
             finally:
                 os.unlink(temp_file.name)
 
@@ -1441,7 +1447,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             }
         ]
 
-        # Existing file with truly invalid CSV content that will cause pandas to fail
+        # Existing file with invalid CSV content
         existing_files = {
             "anomali_threatstream_ip.csv": "invalid\x00binary\x01content\x02"
         }
@@ -1452,7 +1458,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             # Should create file despite parse error
             self.assertEqual(len(csv_files), 1)
 
-            # Verify warning was logged about parse error (may or may not be called depending on pandas behavior)
             # Just verify the function completed without raising an exception
 
     def test_save_update_id_with_errors(self):
@@ -1711,6 +1716,64 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                     self.assertIn("Network error", results[0]["message"])
                 finally:
                     os.unlink(temp_file.name)
+
+    @patch('main.NGSIEM')
+    def test_upload_csv_files_json_parsing_error_recovery(self, mock_ngsiem_class):
+        """Test upload_csv_files_to_ngsiem recovers from JSON parsing errors on empty response."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Mock the 500 error with JSON parsing error message (empty response body)
+        mock_ngsiem.upload_file.return_value = {
+            "status_code": 500,
+            "body": {
+                "errors": [{"message": "Expecting value: line 1 column 1 (char 0)"}]
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_file:
+            temp_file.write(b"test,data\n1,2")
+            temp_file.flush()
+
+            try:
+                results = main.upload_csv_files_to_ngsiem([temp_file.name], "search-all", mock_logger)
+
+                # Should recover and report success
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["status"], "success")
+                self.assertIn("recovered from empty response", results[0]["message"])
+            finally:
+                os.unlink(temp_file.name)
+
+    @patch('main.NGSIEM')
+    def test_upload_csv_files_real_500_error(self, mock_ngsiem_class):
+        """Test upload_csv_files_to_ngsiem properly reports real 500 errors."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Mock a real 500 error (not a JSON parsing error)
+        mock_ngsiem.upload_file.return_value = {
+            "status_code": 500,
+            "body": {
+                "errors": [{"message": "Internal server error: database connection failed"}]
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_file:
+            temp_file.write(b"test,data\n1,2")
+            temp_file.flush()
+
+            try:
+                results = main.upload_csv_files_to_ngsiem([temp_file.name], "search-all", mock_logger)
+
+                # Should report as error (not recovered)
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]["status"], "error")
+                self.assertIn("Upload failed", results[0]["message"])
+            finally:
+                os.unlink(temp_file.name)
 
     @patch.dict(os.environ, {'TEST_MODE': 'true'})
     def test_create_job_test_mode(self):
