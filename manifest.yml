@@ -1,4 +1,4 @@
-app_id: ""
+app_id: c1b48a92e28b4bab8e3f6fa62b49ff65
 name: Anomali ThreatStream Next-Gen SIEM Connector
 description: Automates threat intelligence ingestion from Anomali ThreatStream, synchronizing IOCs (IPs, domains, URLs, email addresses, file hashes) hourly as CSV lookup files for Falcon Next-Gen SIEM detection and hunting workflows
 logo: images/logo.png
@@ -28,7 +28,7 @@ ui:
     dashboards: {}
     navigation: {}
 api_integrations:
-    - id: ""
+    - id: e8562f30beda43e493edc2f5742bf1a8
       name: Anomali API
       description: Anomali ThreatStream API Integration
       path: api-integrations/Anomali.json
@@ -51,7 +51,7 @@ auth:
     permissions: {}
     roles: []
 functions:
-    - id: ""
+    - id: 51e5668b9fa543d6a43dedd90697ac9d
       name: anomali-ioc-ingest
       config: null
       description: Ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM
@@ -66,7 +66,7 @@ functions:
           request_schema: request_schema.json
           response_schema: response_schema.json
           workflow_integration:
-            id: ""
+            id: 28acba4daa6f460c81f07358cacef567
             disruptive: false
             system_action: false
             tags:
@@ -79,7 +79,7 @@ functions:
       max_exec_duration_seconds: 900
       max_exec_memory_mb: 1024
 workflows:
-    - id: ""
+    - id: bd36c4c5d296478fb7af478b835bd445
       name: Anomali Threat Intelligence Ingest
       path: workflows/Anomali_Threat_Intelligence_Ingest.yml
       permissions: []
@@ -88,6 +88,6 @@ logscale:
     saved_searches: []
 lookup_files: []
 docs:
-    id: ""
+    id: f3847a3ac94b40af95a47472ac982dc5
     path: app_docs
     entrypoint: README.md

@@ -55,10 +55,13 @@ from urllib.parse import urlparse, parse_qs
 
 from crowdstrike.foundry.function import Function, Request, Response, APIError
 from falconpy import APIIntegrations, NGSIEM, APIHarnessV2
-import pandas as pd
 
 
 FUNC = Function.instance()
+
+# Maximum file size for NGSIEM lookup uploads (200 MB)
+MAX_UPLOAD_SIZE_BYTES = 200 * 1024 * 1024
+WARNING_THRESHOLD_BYTES = 180 * 1024 * 1024  # Warn when approaching limit
 
 
 class AnomaliFunctionError(Exception):
@@ -75,6 +78,11 @@ class APIIntegrationError(AnomaliFunctionError):
 
 class JobError(AnomaliFunctionError):
     """Exception for job management errors."""
+
+
+class FileSizeLimitError(AnomaliFunctionError):
+    """Exception raised when a lookup file exceeds the NGSIEM upload size limit."""
+
 
 # IOC type mappings for CSV column headers
 IOC_TYPE_MAPPINGS = {
@@ -725,102 +733,126 @@ def process_iocs_to_csv(
         mapping = IOC_TYPE_MAPPINGS[ioc_type]
         filename = f"anomali_threatstream_{ioc_type}.csv"
         filepath = os.path.join(temp_dir, filename)
+        columns = mapping["columns"]
+        primary_col = columns[0]
 
-        # Check if we have existing data to append to
-        existing_data = existing_files.get(filename, "")
-        existing_df = None
-        original_size = 0
-
-        if existing_data:
-            try:
-                # Parse existing CSV data
-                existing_df = pd.read_csv(StringIO(existing_data))
-                original_size = len(existing_df)
-                logger.info(f"Found existing {filename} with {original_size} records")
-            except Exception as e:
-                logger.warning(f"Could not parse existing {filename}: {str(e)}, starting fresh")
-                existing_df = None
-
-        # Process new IOCs
-        new_rows = []
+        # Build new IOC rows and collect their primary keys
+        # Memory: O(new_iocs) - typically small compared to existing file
+        new_rows = {}  # Use dict for O(1) lookup and automatic deduplication
         for ioc in type_iocs:
-            # Extract tags as comma-separated string
             tags = []
             if 'tags' in ioc and isinstance(ioc["tags"], list):
                 tags = [tag.get("name", '') for tag in ioc["tags"] if tag.get('name')]
             tags_str = ",".join(tags) if tags else ""
 
-            row = [
-                ioc.get(mapping["primary_field"], ''),  # Primary IOC value
-                str(ioc.get("confidence", '')),  # Convert to string
-                ioc.get("threat_type", ''),
-                ioc.get("source", ''),
-                tags_str,
-                ioc.get("expiration_ts", '')
-            ]
-            new_rows.append(row)
+            primary_value = str(ioc.get(mapping["primary_field"], ''))
+            if primary_value:
+                # Later entries overwrite earlier ones (temporal precedence)
+                new_rows[primary_value] = [
+                    primary_value,
+                    str(ioc.get("confidence", '')),
+                    str(ioc.get("threat_type", '')),
+                    str(ioc.get("source", '')),
+                    tags_str,
+                    str(ioc.get("expiration_ts", ''))
+                ]
 
-        if new_rows:
-            # Create DataFrame from new data
-            new_df = pd.DataFrame(new_rows, columns=mapping["columns"])
+        new_keys = set(new_rows.keys())
+        logger.info(f"Prepared {len(new_rows)} new IOCs for {ioc_type}")
 
-            # Combine with existing data if available
-            if existing_df is not None:
-                # Append new data to existing data
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        # Check if we have existing data to append to
+        existing_data = existing_files.get(filename, "")
 
-                # Temporal Precedence Deduplication for Threat Intelligence
-                #
-                # This implements STIX 2.1 compliant deduplication that preserves the most
-                # recent threat intelligence data for each IOC. When the same IOC appears
-                # multiple times (from different time periods or sources), we retain the
-                # latest occurrence to ensure analysts get current threat classifications.
-                #
-                # Example IOC Evolution:
-                # - Week 1: 192.168.1.1, confidence=40, type="suspicious", tags="investigation"
-                # - Week 4: 192.168.1.1, confidence=95, type="c2,apt", tags="investigation,confirmed,apt29"
-                # - Result: Analysts receive Week 4 data with high confidence and APT attribution
-                #
-                # This approach is critical for:
-                # - Threat hunting with current confidence scores
-                # - Incident response based on latest threat classifications
-                # - APT attribution tracking as intelligence develops
-                # - Reducing false positives through updated threat types
-                #
-                primary_col = mapping["columns"][0]
-                before_dedup = len(combined_df)
-                combined_df = combined_df.drop_duplicates(subset=[primary_col], keep="last")
-                duplicates_removed = before_dedup - len(combined_df)
-                final_size = len(combined_df)
+        # Streaming CSV processing - memory efficient
+        # Only keeps new_rows dict and streams through existing data
+        original_count = 0
+        duplicates_updated = 0
+        rows_written = 0
 
-                # Track statistics
-                new_unique_records = final_size - original_size
-                stats["total_duplicates_removed"] += duplicates_removed
+        # Use larger buffer (1MB) for better I/O performance
+        with open(filepath, 'w', newline='', encoding='utf-8', buffering=1024*1024) as outfile:
+            writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
+            writer.writerow(columns)  # Write header
 
-                if new_unique_records > 0:
-                    stats["files_with_new_data"] += 1
-                    logger.info(f"Added {new_unique_records} new unique records to {filename}")
-                else:
-                    logger.info(f"No new unique records added to {filename} (all {len(new_df)} were duplicates)")
+            # Stream existing data, filtering out rows that will be replaced
+            if existing_data:
+                try:
+                    reader = csv.reader(StringIO(existing_data))
+                    header = next(reader)  # Skip header
 
-                if duplicates_removed > 0:
-                    logger.info(f"Removed {duplicates_removed} duplicate IOCs, preserving existing entries")
+                    # Verify columns match
+                    if header[0] != primary_col:
+                        logger.warning(
+                            f"Existing file {filename} has incompatible columns "
+                            f"(expected {primary_col}, got {header[0]}), starting fresh"
+                        )
+                    else:
+                        # Batch writes for better performance
+                        batch = []
+                        batch_size = 10000
 
-                logger.info(
-                    f"Combined {original_size} existing + {len(new_df)} new = "
-                    f"{final_size} total records for {filename} ({new_unique_records} net new)"
-                )
-            else:
-                combined_df = new_df
-                stats["files_with_new_data"] += 1
-                logger.info(f"Created new {filename} with {len(combined_df)} records")
+                        for row in reader:
+                            original_count += 1
+                            if row and row[0] not in new_keys:
+                                batch.append(row)
+                                rows_written += 1
+                                if len(batch) >= batch_size:
+                                    writer.writerows(batch)
+                                    batch = []
+                            else:
+                                duplicates_updated += 1
 
-            # Ensure empty strings remain as empty strings, not NaN
-            combined_df = combined_df.fillna("")
+                        # Write remaining batch
+                        if batch:
+                            writer.writerows(batch)
 
-            # Save to CSV
-            combined_df.to_csv(filepath, index=False, quoting=csv.QUOTE_ALL, encoding="utf-8")
-            created_files.append(filepath)
+                        logger.info(f"Streamed {original_count} existing records from {filename}")
+                except Exception as e:
+                    logger.warning(f"Error reading existing file {filename}: {e}, starting fresh")
+
+            # Write new rows in batch
+            writer.writerows(new_rows.values())
+            rows_written += len(new_rows)
+
+        # Calculate statistics
+        new_unique_added = len(new_rows) - duplicates_updated
+        stats["total_duplicates_removed"] += duplicates_updated
+
+        if new_unique_added > 0 or (not existing_data and new_rows):
+            stats["files_with_new_data"] += 1
+
+        # Check file size
+        file_size = os.path.getsize(filepath)
+        file_size_mb = file_size / (1024 * 1024)
+
+        if file_size > MAX_UPLOAD_SIZE_BYTES:
+            error_msg = (
+                f"File {filename} ({file_size_mb:.1f} MB) exceeds the NGSIEM upload limit of 200 MB. "
+                f"The file contains {rows_written:,} IOC records. "
+                f"To reduce file size, configure the workflow to use filters: "
+                f"1) Use 'type' parameter to ingest specific IOC types separately, "
+                f"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70), "
+                f"3) Use 'feed_id' to limit ingestion to specific threat feeds."
+            )
+            logger.error(error_msg)
+            raise FileSizeLimitError(error_msg)
+
+        if file_size > WARNING_THRESHOLD_BYTES:
+            logger.warning(
+                f"File {filename} ({file_size_mb:.1f} MB) is approaching the 200 MB upload limit. "
+                f"Consider using filters to reduce data volume."
+            )
+
+        if existing_data:
+            logger.info(
+                f"Merged {original_count} existing + {len(new_rows)} new = "
+                f"{rows_written} total records for {filename} "
+                f"({new_unique_added} net new, {duplicates_updated} updated)"
+            )
+        else:
+            logger.info(f"Created new {filename} with {rows_written} records ({file_size_mb:.2f} MB)")
+
+        created_files.append(filepath)
 
     return created_files, stats
 

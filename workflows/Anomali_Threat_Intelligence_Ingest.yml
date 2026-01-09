@@ -1,4 +1,4 @@
-name: Anomali Threat Intelligence Ingest
+name: Threat Intelligence Ingest
 description: Anomali ThreatStream IOC ingestion on schedule every hour
 parameters: {}
 provision_on_install: true
@@ -21,6 +21,7 @@ actions:
             limit: 1000
             repository: search-all
             status: active
+            type: hash
         version_constraint: ~0
     CreateVariable:
         next:
@@ -45,7 +46,7 @@ actions:
         version_constraint: ~1
 loops:
     Loop:
-        display: While next exists And next is not equal to 0; 500 iterations; 2 hour limit
+        display: While next exists And next is not equal to 0
         for:
             input: ""
             condition: WorkflowCustomVariable.next:!null+WorkflowCustomVariable.next:!'0'
@@ -53,8 +54,6 @@ loops:
                 - next exists
                 - next is not equal to 0
             continue_on_partial_execution: false
-            max_execution_seconds: 7200
-            max_iteration_count: 500
             sequential: true
         trigger:
             next:
@@ -69,6 +68,7 @@ loops:
                     next: ${data['WorkflowCustomVariable.next']}
                     repository: search-all
                     status: active
+                    type: hash
                 version_constraint: ~0
             UpdateVariable2:
                 id: 6c6eab39063fa3b72d98c82af60deb8a
