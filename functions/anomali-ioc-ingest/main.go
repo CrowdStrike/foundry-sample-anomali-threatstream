@@ -215,6 +215,16 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"limit", limit,
 	)
 
+	// Create temp directory early for file downloads and processing
+	tempDir, err := os.MkdirTemp("", "anomali-iocs-*")
+	if err != nil {
+		return fdk.ErrResp(fdk.APIError{
+			Code:    500,
+			Message: fmt.Sprintf("Failed to create temp directory: %v", err),
+		})
+	}
+	defer os.RemoveAll(tempDir)
+
 	// Create Falcon client
 	falconClient, err := newFalconClient(ctx, r.AccessToken)
 	if err != nil {
@@ -226,10 +236,10 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	}
 
 	// Check for existing files and handle missing file recovery
-	shouldStartFresh, existingFiles, err := checkAndRecoverMissingFiles(ctx, falconClient, r.AccessToken, repository, req.Type, logger)
+	shouldStartFresh, existingFilePaths, err := checkAndRecoverMissingFiles(ctx, falconClient, r.AccessToken, repository, req.Type, tempDir, logger)
 	if err != nil {
 		logger.Warn("Error checking for missing files, starting fresh", "error", err)
-		existingFiles = make(map[string]string)
+		existingFilePaths = make(map[string]string)
 	}
 
 	if shouldStartFresh {
@@ -296,22 +306,8 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		}
 	}
 
-	// Process IOCs into CSV files
-	tempDir, err := os.MkdirTemp("", "anomali-iocs-*")
-	if err != nil {
-		if job != nil {
-			job.State = JobFailed
-			job.Error = err.Error()
-			_ = updateJob(ctx, falconClient, job, logger)
-		}
-		return fdk.ErrResp(fdk.APIError{
-			Code:    500,
-			Message: fmt.Sprintf("Failed to create temp directory: %v", err),
-		})
-	}
-	defer os.RemoveAll(tempDir)
-
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	// Process IOCs into CSV files (tempDir already created earlier)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
 	if err != nil {
 		if job != nil {
 			job.State = JobFailed
@@ -691,24 +687,25 @@ func clearCollectionData(ctx context.Context, falconClient *client.CrowdStrikeAP
 }
 
 // checkAndRecoverMissingFiles checks for existing lookup files and handles missing file recovery
-func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, accessToken, repository, iocType string, logger *slog.Logger) (bool, map[string]string, error) {
+// Returns file paths (not contents) to support streaming large files
+func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, accessToken, repository, iocType, tempDir string, logger *slog.Logger) (bool, map[string]string, error) {
 	shouldStartFresh := false
-	var existingFiles map[string]string
+	var existingFilePaths map[string]string
 	var err error
 
 	if iocType == "" {
 		// No type specified - check if any Anomali files exist
 		logger.Info("No type filter specified - checking for any existing Anomali lookup files")
-		existingFiles, err = downloadExistingLookupFiles(ctx, accessToken, repository, "", logger)
+		existingFilePaths, err = downloadExistingLookupFiles(ctx, accessToken, repository, "", tempDir, logger)
 		if err != nil {
 			return false, nil, err
 		}
 
-		if len(existingFiles) == 0 {
+		if len(existingFilePaths) == 0 {
 			logger.Info("No existing Anomali lookup files found - starting completely fresh")
 			shouldStartFresh = true
 		} else {
-			logger.Info("Found existing Anomali lookup files", "count", len(existingFiles))
+			logger.Info("Found existing Anomali lookup files", "count", len(existingFilePaths))
 
 			// Check for missing specific type files and clear their update_ids
 			expectedFiles := make([]string, 0)
@@ -718,7 +715,7 @@ func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.Crowd
 
 			var missingFiles []string
 			for _, f := range expectedFiles {
-				if _, exists := existingFiles[f]; !exists {
+				if _, exists := existingFilePaths[f]; !exists {
 					missingFiles = append(missingFiles, f)
 				}
 			}
@@ -751,12 +748,12 @@ func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.Crowd
 	} else {
 		// Type filter specified - download existing files for that type
 		logger.Info("Checking for existing files for type", "type", iocType)
-		existingFiles, err = downloadExistingLookupFiles(ctx, accessToken, repository, iocType, logger)
+		existingFilePaths, err = downloadExistingLookupFiles(ctx, accessToken, repository, iocType, tempDir, logger)
 		if err != nil {
 			return false, nil, err
 		}
 
-		if len(existingFiles) == 0 {
+		if len(existingFilePaths) == 0 {
 			logger.Info("No existing files found for type - will create new file", "type", iocType)
 			_ = clearUpdateIDForType(ctx, falconClient, iocType, logger)
 		} else {
@@ -764,16 +761,17 @@ func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.Crowd
 		}
 	}
 
-	return shouldStartFresh, existingFiles, nil
+	return shouldStartFresh, existingFilePaths, nil
 }
 
-// downloadExistingLookupFiles downloads existing lookup files from NGSIEM
-func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, iocType string, logger *slog.Logger) (map[string]string, error) {
+// downloadExistingLookupFiles downloads existing lookup files from NGSIEM to temp files
+// Returns a map of filename -> temp file path (to avoid loading large files into memory)
+func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, iocType string, tempDir string, logger *slog.Logger) (map[string]string, error) {
 	if isTestMode() {
 		return downloadExistingLookupFilesLocally(repository, iocType, logger)
 	}
 
-	existingFiles := make(map[string]string)
+	existingFilePaths := make(map[string]string)
 
 	knownFilenames := []string{
 		"anomali_threatstream_ip.csv",
@@ -823,9 +821,9 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 	opts := fdk.FalconClientOpts()
 	apiHost := falcon.Cloud(opts.Cloud).Host()
 
-	// Create HTTP client for direct API calls
+	// Create HTTP client for direct API calls - increase timeout for large files
 	httpClient := &http.Client{
-		Timeout: 60 * time.Second,
+		Timeout: 5 * time.Minute,
 	}
 
 	for _, filename := range knownFilenames {
@@ -869,26 +867,40 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 			continue
 		}
 
-		// Read the file content
-		content, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		// Stream file content directly to disk instead of loading into memory
+		tempFilePath := filepath.Join(tempDir, "existing_"+filename)
+		tempFile, err := os.Create(tempFilePath)
 		if err != nil {
-			logger.Warn("Failed to read lookup file content", "filename", filename, "error", err)
+			resp.Body.Close()
+			logger.Warn("Failed to create temp file for lookup", "filename", filename, "error", err)
 			continue
 		}
 
-		existingFiles[filename] = string(content)
-		logger.Info("Downloaded existing lookup file",
+		// Use buffered copy to stream efficiently
+		bytesWritten, err := io.Copy(tempFile, resp.Body)
+		resp.Body.Close()
+		tempFile.Close()
+
+		if err != nil {
+			os.Remove(tempFilePath)
+			logger.Warn("Failed to stream lookup file to disk", "filename", filename, "error", err)
+			continue
+		}
+
+		existingFilePaths[filename] = tempFilePath
+		logger.Info("Downloaded existing lookup file to disk",
 			"filename", filename,
-			"size_bytes", len(content))
+			"temp_path", tempFilePath,
+			"size_bytes", bytesWritten)
 	}
 
-	return existingFiles, nil
+	return existingFilePaths, nil
 }
 
-// downloadExistingLookupFilesLocally reads existing lookup files from local test directory
+// downloadExistingLookupFilesLocally returns paths to existing lookup files from local test directory
+// Returns a map of filename -> file path (consistent with downloadExistingLookupFiles)
 func downloadExistingLookupFilesLocally(repository, iocType string, logger *slog.Logger) (map[string]string, error) {
-	existingFiles := make(map[string]string)
+	existingFilePaths := make(map[string]string)
 
 	testDir := filepath.Join(".", "test_output", repository)
 	logger.Info("TEST MODE: Checking for existing lookup files", "dir", testDir)
@@ -936,20 +948,20 @@ func downloadExistingLookupFilesLocally(repository, iocType string, logger *slog
 
 	for _, filename := range knownFilenames {
 		filePath := filepath.Join(testDir, filename)
-		content, err := os.ReadFile(filePath)
+		fileInfo, err := os.Stat(filePath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				logger.Info("TEST MODE: File not found (expected for new files)", "filename", filename)
 			} else {
-				logger.Warn("TEST MODE: Error reading file", "filename", filename, "error", err)
+				logger.Warn("TEST MODE: Error checking file", "filename", filename, "error", err)
 			}
 			continue
 		}
-		existingFiles[filename] = string(content)
-		logger.Info("TEST MODE: Read existing lookup file", "filename", filename, "size_bytes", len(content))
+		existingFilePaths[filename] = filePath
+		logger.Info("TEST MODE: Found existing lookup file", "filename", filename, "size_bytes", fileInfo.Size())
 	}
 
-	return existingFiles, nil
+	return existingFilePaths, nil
 }
 
 // fetchIOCsFromAnomali fetches IOCs from the Anomali ThreatStream API via API Integration
@@ -1288,7 +1300,8 @@ func mapToIOC(m map[string]interface{}) IOC {
 }
 
 // processIOCsToCSV processes IOCs into CSV files with streaming for memory efficiency
-func processIOCsToCSV(iocs []IOC, tempDir string, existingFiles map[string]string, logger *slog.Logger) ([]string, ProcessStats, error) {
+// existingFilePaths maps filename -> temp file path (or empty string if no existing file)
+func processIOCsToCSV(iocs []IOC, tempDir string, existingFilePaths map[string]string, logger *slog.Logger) ([]string, ProcessStats, error) {
 	stats := ProcessStats{
 		TotalNewIOCs: len(iocs),
 	}
@@ -1345,8 +1358,8 @@ func processIOCsToCSV(iocs []IOC, tempDir string, existingFiles map[string]strin
 
 		logger.Info("Prepared new IOCs", "type", iocType, "count", len(newRows))
 
-		// Get existing data
-		existingData := existingFiles[filename]
+		// Get existing file path (if any)
+		existingFilePath := existingFilePaths[filename]
 
 		// Process with streaming CSV
 		var originalCount, duplicatesUpdated, rowsWritten int
@@ -1366,57 +1379,63 @@ func processIOCsToCSV(iocs []IOC, tempDir string, existingFiles map[string]strin
 			return nil, stats, fmt.Errorf("failed to write header: %w", err)
 		}
 
-		// Stream existing data, filtering out rows that will be replaced
-		if existingData != "" {
-			reader := csv.NewReader(strings.NewReader(existingData))
-
-			// Read and verify header
-			header, err := reader.Read()
+		// Stream existing data from file, filtering out rows that will be replaced
+		if existingFilePath != "" {
+			existingFile, err := os.Open(existingFilePath)
 			if err != nil {
-				logger.Warn("Error reading existing file header, starting fresh", "filename", filename, "error", err)
-			} else if len(header) > 0 && header[0] != primaryCol {
-				logger.Warn("Existing file has incompatible columns, starting fresh",
-					"filename", filename, "expected", primaryCol, "got", header[0])
+				logger.Warn("Error opening existing file, starting fresh", "filename", filename, "error", err)
 			} else {
-				// Batch processing for performance
-				batch := make([][]string, 0, 10000)
+				defer existingFile.Close()
+				reader := csv.NewReader(bufio.NewReaderSize(existingFile, 1024*1024)) // 1MB read buffer
 
-				for {
-					row, err := reader.Read()
-					if err == io.EOF {
-						break
-					}
-					if err != nil {
-						logger.Warn("Error reading row, skipping", "error", err)
-						continue
-					}
+				// Read and verify header
+				header, err := reader.Read()
+				if err != nil {
+					logger.Warn("Error reading existing file header, starting fresh", "filename", filename, "error", err)
+				} else if len(header) > 0 && header[0] != primaryCol {
+					logger.Warn("Existing file has incompatible columns, starting fresh",
+						"filename", filename, "expected", primaryCol, "got", header[0])
+				} else {
+					// Batch processing for performance
+					batch := make([][]string, 0, 10000)
 
-					originalCount++
-					if len(row) > 0 && !newKeys[row[0]] {
-						batch = append(batch, row)
-						rowsWritten++
-
-						if len(batch) >= 10000 {
-							if err := writer.WriteAll(batch); err != nil {
-								file.Close()
-								return nil, stats, fmt.Errorf("failed to write batch: %w", err)
-							}
-							batch = batch[:0]
+					for {
+						row, err := reader.Read()
+						if err == io.EOF {
+							break
 						}
-					} else {
-						duplicatesUpdated++
-					}
-				}
+						if err != nil {
+							logger.Warn("Error reading row, skipping", "error", err)
+							continue
+						}
 
-				// Write remaining batch
-				if len(batch) > 0 {
-					if err := writer.WriteAll(batch); err != nil {
-						file.Close()
-						return nil, stats, fmt.Errorf("failed to write final batch: %w", err)
-					}
-				}
+						originalCount++
+						if len(row) > 0 && !newKeys[row[0]] {
+							batch = append(batch, row)
+							rowsWritten++
 
-				logger.Info("Streamed existing records", "filename", filename, "count", originalCount)
+							if len(batch) >= 10000 {
+								if err := writer.WriteAll(batch); err != nil {
+									file.Close()
+									return nil, stats, fmt.Errorf("failed to write batch: %w", err)
+								}
+								batch = batch[:0]
+							}
+						} else {
+							duplicatesUpdated++
+						}
+					}
+
+					// Write remaining batch
+					if len(batch) > 0 {
+						if err := writer.WriteAll(batch); err != nil {
+							file.Close()
+							return nil, stats, fmt.Errorf("failed to write final batch: %w", err)
+						}
+					}
+
+					logger.Info("Streamed existing records", "filename", filename, "count", originalCount)
+				}
 			}
 		}
 
@@ -1474,11 +1493,11 @@ func processIOCsToCSV(iocs []IOC, tempDir string, existingFiles map[string]strin
 		newUniqueAdded := len(newRows) - duplicatesUpdated
 		stats.TotalDuplicatesRemoved += duplicatesUpdated
 
-		if newUniqueAdded > 0 || (existingData == "" && len(newRows) > 0) {
+		if newUniqueAdded > 0 || (existingFilePath == "" && len(newRows) > 0) {
 			stats.FilesWithNewData++
 		}
 
-		if existingData != "" {
+		if existingFilePath != "" {
 			logger.Info("Merged records",
 				"filename", filename,
 				"existing", originalCount,

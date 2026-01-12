@@ -253,8 +253,14 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 5.6.7.8,70,malware,existing,tag1,2024-06-01
 `
 
-	existingFiles := map[string]string{
-		"anomali_threatstream_ip.csv": existingCSV,
+	// Write existing data to a temp file (simulating downloaded existing file)
+	existingFilePath := filepath.Join(tempDir, "existing_anomali_threatstream_ip.csv")
+	if err := os.WriteFile(existingFilePath, []byte(existingCSV), 0644); err != nil {
+		t.Fatalf("Failed to write existing file: %v", err)
+	}
+
+	existingFilePaths := map[string]string{
+		"anomali_threatstream_ip.csv": existingFilePath,
 	}
 
 	// New IOCs - one update, one new
@@ -279,7 +285,7 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 		},
 	}
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1152,15 +1158,21 @@ func TestProcessIOCsToCSV_InvalidExistingCSV(t *testing.T) {
 	existingCSV := `wrong_column,data
 something,value
 `
-	existingFiles := map[string]string{
-		"anomali_threatstream_ip.csv": existingCSV,
+	// Write existing data to a temp file (simulating downloaded existing file)
+	existingFilePath := filepath.Join(tempDir, "existing_anomali_threatstream_ip.csv")
+	if err := os.WriteFile(existingFilePath, []byte(existingCSV), 0644); err != nil {
+		t.Fatalf("Failed to write existing file: %v", err)
+	}
+
+	existingFilePaths := map[string]string{
+		"anomali_threatstream_ip.csv": existingFilePath,
 	}
 
 	iocs := []IOC{
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90},
 	}
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
