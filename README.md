@@ -127,8 +127,8 @@ Then redeploy: `foundry apps deploy`
 1. **Create and activate virtual environment**:
    ```bash
    cd functions/anomali-ioc-ingest
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
 2. **Install dependencies**:
