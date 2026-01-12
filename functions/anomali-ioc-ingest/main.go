@@ -548,13 +548,10 @@ func createJob(ctx context.Context, falconClient *client.CrowdStrikeAPISpecifica
 
 	if lastUpdate != nil {
 		jobParams["update_id__gt"] = lastUpdate.UpdateID
-		// Add lookback time for incremental sync - use 65 minutes to ensure no data gaps
-		lookbackTime := now.Add(-65 * time.Minute)
-		jobParams["modified_ts_gt"] = lookbackTime.Format(time.RFC3339)
-		jobParams["modified_ts_lt"] = now.Format(time.RFC3339)
+		logger.Info("Incremental sync - resuming from last update_id", "type", iocType, "update_id", lastUpdate.UpdateID)
 	} else {
 		jobParams["update_id__gt"] = "0"
-		logger.Info("Fresh start - no time constraints", "type", iocType)
+		logger.Info("Fresh start - no previous update_id found", "type", iocType)
 	}
 
 	job := &IngestJob{
@@ -1832,13 +1829,10 @@ func createJobWithClient(ctx context.Context, storage CustomStorageClient, lastU
 
 	if lastUpdate != nil {
 		jobParams["update_id__gt"] = lastUpdate.UpdateID
-		// Add lookback time for incremental sync - use 65 minutes to ensure no data gaps
-		lookbackTime := now.Add(-65 * time.Minute)
-		jobParams["modified_ts_gt"] = lookbackTime.Format(time.RFC3339)
-		jobParams["modified_ts_lt"] = now.Format(time.RFC3339)
+		logger.Info("Incremental sync - resuming from last update_id", "type", iocType, "update_id", lastUpdate.UpdateID)
 	} else {
 		jobParams["update_id__gt"] = "0"
-		logger.Info("Fresh start - no time constraints", "type", iocType)
+		logger.Info("Fresh start - no previous update_id found", "type", iocType)
 	}
 
 	job := &IngestJob{
