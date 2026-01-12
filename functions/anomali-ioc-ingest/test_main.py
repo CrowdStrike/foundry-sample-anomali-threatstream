@@ -661,12 +661,12 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock API harness commands for type-specific sync:
-        # 1. clear_update_id_for_type calls DeleteObject (for missing ip file)
-        # 2. get_last_update_id calls GetObject - should fail (no previous update)
-        # 3. create_job calls PutObject (success)
-        # 4. update_job calls PutObject (success for completion)
+        # 1. get_last_update_id calls GetObject - should fail (no previous update)
+        # 2. create_job calls PutObject (success)
+        # 3. update_job calls PutObject (success for completion)
+        # Note: clear_update_id_for_type is no longer called when files are missing
+        # (the update_id tracks API progress, not file existence)
         mock_api_harness.command.side_effect = [
-            Exception("Object not found"),  # DeleteObject for clear_update_id_for_type (expected)
             Exception("Object not found"),  # GetObject for last update (not found - expected)
             {"status_code": 200},          # PutObject for create_job
             {"status_code": 200},          # PutObject for update_job (completed)
@@ -1090,12 +1090,12 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock API harness calls:
-        # 1. clear_update_id_for_type calls DeleteObject (for missing ip file)
-        # 2. get_last_update_id calls GetObject (not found)
-        # 3. create_job calls PutObject (success)
-        # 4. update_job calls PutObject (success for completion)
+        # 1. get_last_update_id calls GetObject (not found)
+        # 2. create_job calls PutObject (success)
+        # 3. update_job calls PutObject (success for completion)
+        # Note: clear_update_id_for_type is no longer called when files are missing
+        # (the update_id tracks API progress, not file existence)
         mock_api_harness.command.side_effect = [
-            Exception("Object not found"),  # DeleteObject for clear_update_id_for_type (expected)
             Exception("Object not found"),  # GetObject for last update (not found)
             {"status_code": 200},          # PutObject for create_job
             {"status_code": 200},          # PutObject for update_job (completed)

@@ -1200,8 +1200,12 @@ def check_and_recover_missing_files(
         logger.info(f"Checking for existing files for type: {type_filter}")
         existing_files = download_existing_lookup_files(repository, type_filter, logger)
         if not existing_files:
+            # Note: We intentionally do NOT clear the update_id here.
+            # The update_id tracks API pagination progress, not file existence.
+            # Clearing it would cause us to re-fetch all data from the beginning,
+            # resulting in file size regression (shrinking instead of growing).
+            # If files don't exist, new ones will be created with fresh data.
             logger.info(f"No existing files found for type {type_filter} - will create new file")
-            clear_update_id_for_type(api_client, headers, type_filter, logger)
         else:
             logger.info(f"Found existing files for type {type_filter} - will merge with existing data")
 
@@ -1301,6 +1305,24 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
             # Get type-specific update_id
             last_update = get_last_update_id(api_client, headers, type_filter, logger)
+
+            # Safety check: if we have saved progress but couldn't download existing files,
+            # we should not proceed as we would lose accumulated data by uploading a partial file.
+            # This can happen if the file download times out or fails temporarily.
+            if last_update and type_filter and not existing_files and not should_start_fresh:
+                error_msg = (
+                    f"Cannot proceed: have saved progress (update_id={last_update.get('update_id')}) "
+                    f"for type '{type_filter}' but failed to download existing lookup file. "
+                    "This would cause data loss. Please retry or check NGSIEM connectivity."
+                )
+                logger.error(
+                    f"Data integrity protection: have saved progress but cannot download existing files. "
+                    f"type={type_filter}, last_update_id={last_update.get('update_id')}"
+                )
+                return Response(
+                    errors=[APIError(code=500, message=error_msg)],
+                    code=500
+                )
 
             # Create type-specific job
             job = create_job(api_client, headers, last_update, type_filter, logger)

@@ -261,6 +261,20 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 			logger.Warn("Error getting last update_id, starting fresh", "error", err)
 		}
 
+		// Safety check: if we have saved progress but couldn't download existing files,
+		// we should not proceed as we would lose accumulated data by uploading a partial file.
+		// This can happen if the file download times out or fails temporarily.
+		if lastUpdate != nil && req.Type != "" && len(existingFilePaths) == 0 && !shouldStartFresh {
+			logger.Error("Data integrity protection: have saved progress but cannot download existing files",
+				"type", req.Type,
+				"last_update_id", lastUpdate.UpdateID,
+				"hint", "Existing lookup file may have failed to download. Retry later or check NGSIEM connectivity.")
+			return fdk.ErrResp(fdk.APIError{
+				Code:    500,
+				Message: fmt.Sprintf("Cannot proceed: have saved progress (update_id=%s) for type '%s' but failed to download existing lookup file. This would cause data loss. Please retry or check NGSIEM connectivity.", lastUpdate.UpdateID, req.Type),
+			})
+		}
+
 		job, err = createJob(ctx, falconClient, lastUpdate, req.Type, logger)
 		if err != nil {
 			logger.Error("Failed to create job", "error", err)
@@ -751,8 +765,12 @@ func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.Crowd
 		}
 
 		if len(existingFilePaths) == 0 {
+			// Note: We intentionally do NOT clear the update_id here.
+			// The update_id tracks API pagination progress, not file existence.
+			// Clearing it would cause us to re-fetch all data from the beginning,
+			// resulting in file size regression (shrinking instead of growing).
+			// If files don't exist, new ones will be created with fresh data.
 			logger.Info("No existing files found for type - will create new file", "type", iocType)
-			_ = clearUpdateIDForType(ctx, falconClient, iocType, logger)
 		} else {
 			logger.Info("Found existing files for type - will merge with existing data", "type", iocType)
 		}
