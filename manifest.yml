@@ -19,6 +19,7 @@ ignored:
     - .*/\.pytest_cache/.*
     - \.coverage$
     - .*/test_.*\.py$
+    - .*_test\.go$
     - e2e
     - e2e/.+
 ui:
@@ -75,7 +76,9 @@ functions:
                 - IOC
                 - NGSIEM
           permissions: []
-      language: python
+      # Change to 'go' for the high-performance Go implementation
+      # Both main.py (Python) and main.go (Go) exist in the same directory
+      language: go
       max_exec_duration_seconds: 900
       max_exec_memory_mb: 1024
 workflows:

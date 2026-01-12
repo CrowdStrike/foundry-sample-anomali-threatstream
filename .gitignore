@@ -6,6 +6,10 @@ __pycache__/
 htmlcov/
 .coverage
 
+# Go
+go.sum
+functions/anomali-ioc-ingest/anomali-ioc-ingest
+
 # IDEs
 .idea/
 

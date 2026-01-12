@@ -468,7 +468,9 @@ def download_existing_lookup_files_locally(
             "anomali_threatstream_domain.csv",
             "anomali_threatstream_url.csv",
             "anomali_threatstream_email.csv",
-            "anomali_threatstream_hash_md5.csv"
+            "anomali_threatstream_hash_md5.csv",
+            "anomali_threatstream_hash_sha1.csv",
+            "anomali_threatstream_hash_sha256.csv"
         ]
 
         # Filter by type if specified
@@ -536,7 +538,9 @@ def download_existing_lookup_files_from_ngsiem(
             "anomali_threatstream_domain.csv",
             "anomali_threatstream_url.csv",
             "anomali_threatstream_email.csv",
-            "anomali_threatstream_hash_md5.csv"
+            "anomali_threatstream_hash_md5.csv",
+            "anomali_threatstream_hash_sha1.csv",
+            "anomali_threatstream_hash_sha256.csv"
         ]
 
         # Filter by type if specified
@@ -605,8 +609,8 @@ def clear_collection_data(
 
         # Clear the main update tracker and all type-specific trackers
         update_keys = [KEY_LAST_UPDATE]  # Main tracker
-        # Add type-specific trackers
-        for ioc_type in ["ip", "domain", "url", "email", "hash"]:
+        # Add type-specific trackers (including individual hash types)
+        for ioc_type in ["ip", "domain", "url", "email", "hash", "hash_md5", "hash_sha1", "hash_sha256"]:
             update_keys.append(f"{KEY_LAST_UPDATE}_{ioc_type}")
 
         for key in update_keys:

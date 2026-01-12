@@ -312,7 +312,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         }
 
         # Mock API responses - fresh start scenario requires clearing collection data
-        clear_calls = [Exception("Not found")] * 6  # Expected calls for clearing collection data
+        # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
+        clear_calls = [Exception("Not found")] * 9  # Expected calls for clearing collection data
         job_calls = [
             Exception("Object not found"),  # get_last_update_id
             {"status_code": 200},          # create_job
@@ -1033,7 +1034,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         main.clear_collection_data(mock_api_harness, headers, mock_logger)
 
         # Verify all delete operations were called
-        self.assertEqual(mock_api_harness.command.call_count, 6)
+        # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
+        self.assertEqual(mock_api_harness.command.call_count, 9)
 
     def test_save_update_id_error_handling(self):
         """Test save_update_id error handling."""
@@ -1423,7 +1425,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         main.clear_collection_data(mock_api_client, mock_headers, mock_logger)
 
         # Verify the expected number of calls were made
-        self.assertEqual(mock_api_client.command.call_count, 6)
+        # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
+        self.assertEqual(mock_api_client.command.call_count, 9)
 
     def test_process_iocs_existing_file_parse_error(self):
         """Test process_iocs_to_csv with existing file parsing error."""
