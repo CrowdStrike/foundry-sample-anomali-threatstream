@@ -542,7 +542,7 @@ def download_existing_lookup_files_from_ngsiem(
     enabling processing of files up to the 200MB NGSIEM limit.
 
     Resilience features:
-    - HEAD request first to check file existence and get expected size
+    - Streaming GET with Content-Length verification (HEAD not supported by NGSIEM)
     - Retry with exponential backoff (3 attempts) for transient errors
     - Size verification to detect incomplete downloads
     - Aborts if any existing file fails to download (prevents data loss)
@@ -610,33 +610,11 @@ def download_existing_lookup_files_from_ngsiem(
             headers = {"Authorization": f"Bearer {access_token}"}
             params = {"repository": repository, "filename": filename}
 
-            # First, do a HEAD request to check if file exists and get expected size
-            try:
-                head_resp = http_requests.head(url, headers=headers, params=params, timeout=30)
-
-                if head_resp.status_code == 404:
-                    logger.info(f"File {filename} not found (will be created)")
-                    continue  # File doesn't exist - no risk of data loss
-
-                if head_resp.status_code != 200:
-                    logger.warning(f"HEAD request for {filename} returned {head_resp.status_code}")
-                    failed_downloads.append(filename)
-                    continue
-
-                # File exists - get expected size for verification
-                expected_size = int(head_resp.headers.get("Content-Length", 0))
-                logger.info(f"File exists: {filename}, expected size: {expected_size:,} bytes "
-                           f"({expected_size / (1024*1024):.2f} MB)")
-
-            except http_requests.exceptions.RequestException as e:
-                logger.warning(f"HEAD request failed for {filename}: {e}")
-                # Can't determine if file exists - treat as potential data loss risk
-                failed_downloads.append(filename)
-                continue
-
             # Retry logic for download
+            # Note: We use GET directly instead of HEAD because NGSIEM returns 405 for HEAD requests
             last_error = None
             downloaded = False
+            file_not_found = False
 
             for attempt in range(1, max_retries + 1):
                 if attempt > 1:
@@ -649,10 +627,21 @@ def download_existing_lookup_files_from_ngsiem(
                 try:
                     with http_requests.get(url, headers=headers, params=params,
                                            stream=True, timeout=download_timeout) as resp:
+                        # Handle 404 - file doesn't exist (not an error, just skip)
+                        if resp.status_code == 404:
+                            logger.info(f"File {filename} not found (will be created)")
+                            file_not_found = True
+                            break  # Exit retry loop - no need to retry for non-existent files
+
                         if resp.status_code != 200:
                             last_error = f"HTTP {resp.status_code}"
                             logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
                             continue
+
+                        # Get expected size from Content-Length header for verification
+                        expected_size = int(resp.headers.get("Content-Length", 0))
+                        logger.info(f"File exists: {filename}, downloading {expected_size:,} bytes "
+                                   f"({expected_size / (1024*1024):.2f} MB)")
 
                         dest_path = os.path.join(temp_dir, f"existing_{filename}")
                         bytes_written = 0
@@ -685,6 +674,10 @@ def download_existing_lookup_files_from_ngsiem(
                     last_error = str(e)
                     logger.warning(f"Error on download attempt {attempt} for {filename}: {last_error}")
                     continue
+
+            # Skip files that don't exist - no data loss risk
+            if file_not_found:
+                continue
 
             # File existed but all retries failed - data loss risk
             if not downloaded:
