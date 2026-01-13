@@ -540,9 +540,17 @@ def download_existing_lookup_files_from_ngsiem(
     Uses streaming HTTP with OAuth2 token from FalconPy to download files directly
     to disk. This keeps memory usage constant (~3-5MB) regardless of file size,
     enabling processing of files up to the 200MB NGSIEM limit.
+
+    Resilience features:
+    - HEAD request first to check file existence and get expected size
+    - Retry with exponential backoff (3 attempts) for transient errors
+    - Size verification to detect incomplete downloads
+    - Aborts if any existing file fails to download (prevents data loss)
     """
-    # pylint: disable=too-many-branches,too-many-statements,too-many-locals
+    # pylint: disable=too-many-branches,too-many-statements,too-many-locals,too-many-nested-blocks
     existing_files = {}
+    failed_downloads = []  # Track files that existed but failed to download
+    max_retries = 3
 
     try:
         logger.info(f"Checking for existing lookup files in repository: {repository}")
@@ -593,20 +601,59 @@ def download_existing_lookup_files_from_ngsiem(
         access_token = token_response["body"]["access_token"]
         base_url = os.environ.get("CS_CLOUD", "https://api.crowdstrike.com")
 
-        # Stream download each file to disk
+        # Use longer timeout for large files: 200MB at 350KB/s = 9.5 minutes
+        download_timeout = 600  # 10 minutes
+
         for filename in filenames_to_try:
+            # Build the download URL
+            url = f"{base_url}/loggingapi/entities/lookup-files/v1"
+            headers = {"Authorization": f"Bearer {access_token}"}
+            params = {"repository": repository, "filename": filename}
+
+            # First, do a HEAD request to check if file exists and get expected size
             try:
-                logger.info(f"Attempting to download existing lookup file: {filename}")
+                head_resp = http_requests.head(url, headers=headers, params=params, timeout=30)
 
-                # Build the download URL
-                url = f"{base_url}/loggingapi/entities/lookup-files/v1"
-                headers = {"Authorization": f"Bearer {access_token}"}
-                params = {"repository": repository, "filename": filename}
+                if head_resp.status_code == 404:
+                    logger.info(f"File {filename} not found (will be created)")
+                    continue  # File doesn't exist - no risk of data loss
 
-                # Stream download to temp file
-                with http_requests.get(url, headers=headers, params=params,
-                                       stream=True, timeout=300) as resp:
-                    if resp.status_code == 200:
+                if head_resp.status_code != 200:
+                    logger.warning(f"HEAD request for {filename} returned {head_resp.status_code}")
+                    failed_downloads.append(filename)
+                    continue
+
+                # File exists - get expected size for verification
+                expected_size = int(head_resp.headers.get("Content-Length", 0))
+                logger.info(f"File exists: {filename}, expected size: {expected_size:,} bytes "
+                           f"({expected_size / (1024*1024):.2f} MB)")
+
+            except http_requests.exceptions.RequestException as e:
+                logger.warning(f"HEAD request failed for {filename}: {e}")
+                # Can't determine if file exists - treat as potential data loss risk
+                failed_downloads.append(filename)
+                continue
+
+            # Retry logic for download
+            last_error = None
+            downloaded = False
+
+            for attempt in range(1, max_retries + 1):
+                if attempt > 1:
+                    # Exponential backoff: 2s, 4s, 8s
+                    backoff = 2 ** attempt
+                    logger.info(f"Retrying download of {filename} after {backoff}s "
+                               f"(attempt {attempt}/{max_retries})")
+                    time.sleep(backoff)
+
+                try:
+                    with http_requests.get(url, headers=headers, params=params,
+                                           stream=True, timeout=download_timeout) as resp:
+                        if resp.status_code != 200:
+                            last_error = f"HTTP {resp.status_code}"
+                            logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
+                            continue
+
                         dest_path = os.path.join(temp_dir, f"existing_{filename}")
                         bytes_written = 0
 
@@ -616,22 +663,45 @@ def download_existing_lookup_files_from_ngsiem(
                                     f.write(chunk)
                                     bytes_written += len(chunk)
 
-                        existing_files[filename] = dest_path  # Return file PATH
-                        logger.info(f"Streamed {filename} to disk ({bytes_written:,} bytes)")
-                    elif resp.status_code == 404:
-                        logger.info(f"File {filename} not found (expected for new files)")
-                    else:
-                        logger.info(f"File {filename} download failed: {resp.status_code}")
+                        # Verify downloaded size matches expected size (if known)
+                        if expected_size > 0 and bytes_written != expected_size:
+                            os.remove(dest_path)
+                            last_error = f"Size mismatch: got {bytes_written}, expected {expected_size}"
+                            logger.warning(f"Download attempt {attempt} for {filename}: {last_error}")
+                            continue
 
-            except http_requests.exceptions.RequestException as e:
-                logger.info(f"File {filename} not accessible: {str(e)}")
-                continue
-            except Exception as e:
-                logger.info(f"Error downloading {filename}: {str(e)}")
-                continue
+                        # Success!
+                        existing_files[filename] = dest_path
+                        logger.info(f"Downloaded {filename} to disk ({bytes_written:,} bytes, "
+                                   f"attempt {attempt})")
+                        downloaded = True
+                        break
+
+                except http_requests.exceptions.RequestException as e:
+                    last_error = str(e)
+                    logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
+                    continue
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"Error on download attempt {attempt} for {filename}: {last_error}")
+                    continue
+
+            # File existed but all retries failed - data loss risk
+            if not downloaded:
+                logger.error(f"Failed to download existing file {filename} after {max_retries} retries: "
+                            f"{last_error}")
+                failed_downloads.append(filename)
 
     except Exception as e:
         logger.error(f"Error checking for existing lookup files: {str(e)}")
+        raise
+
+    # If any existing files failed to download, abort to prevent data loss
+    if failed_downloads:
+        raise AnomaliFunctionError(
+            f"Download failed for {len(failed_downloads)} existing file(s) after {max_retries} "
+            f"retries each: {failed_downloads} - aborting to prevent data loss"
+        )
 
     return existing_files
 
@@ -894,6 +964,22 @@ def process_iocs_to_csv(
         # Check file size
         file_size = os.path.getsize(filepath)
         file_size_mb = file_size / (1024 * 1024)
+
+        # SAFETY CHECK: If existing file was present, verify new file isn't dramatically smaller
+        # This prevents data loss if something went wrong during download or processing
+        if existing_file_path and os.path.exists(existing_file_path):
+            existing_size = os.path.getsize(existing_file_path)
+            # If new file is less than 10% of existing file size, something is wrong
+            # (unless existing file was tiny, i.e., < 10KB)
+            if existing_size > 10 * 1024 and file_size < existing_size // 10:
+                error_msg = (
+                    f"SAFETY CHECK FAILED: new file {filename} ({file_size_mb:.2f} MB, "
+                    f"{rows_written:,} records) is dramatically smaller than existing file "
+                    f"({existing_size / (1024*1024):.2f} MB). This likely indicates data loss. "
+                    f"Aborting to protect existing data. Check download logs for errors."
+                )
+                logger.error(error_msg)
+                raise AnomaliFunctionError(error_msg)
 
         if file_size > MAX_UPLOAD_SIZE_BYTES:
             error_msg = (
