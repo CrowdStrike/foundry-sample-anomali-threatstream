@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/CrowdStrike/foundry-fn-go v0.24.1
 	github.com/crowdstrike/gofalcon v0.19.0
+	github.com/go-openapi/runtime v0.27.1
 )
 
 require (
@@ -17,7 +18,6 @@ require (
 	github.com/go-openapi/jsonpointer v0.20.2 // indirect
 	github.com/go-openapi/jsonreference v0.20.4 // indirect
 	github.com/go-openapi/loads v0.21.5 // indirect
-	github.com/go-openapi/runtime v0.27.1 // indirect
 	github.com/go-openapi/spec v0.20.14 // indirect
 	github.com/go-openapi/strfmt v0.22.2 // indirect
 	github.com/go-openapi/swag v0.22.9 // indirect

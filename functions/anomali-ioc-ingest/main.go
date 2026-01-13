@@ -836,10 +836,15 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 	opts := fdk.FalconClientOpts()
 	apiHost := falcon.Cloud(opts.Cloud).Host()
 
-	// Create HTTP client for direct API calls - increase timeout for large files
+	// Create HTTP client for direct API calls
+	// Use 10-minute timeout: 200MB at 350KB/s = 9.5 minutes (worst case)
 	httpClient := &http.Client{
-		Timeout: 5 * time.Minute,
+		Timeout: 10 * time.Minute,
 	}
+
+	// Track files that existed but failed to download (to prevent data loss)
+	failedDownloads := []string{}
+	const maxRetries = 3
 
 	for _, filename := range knownFilenames {
 		// Build the URL for the lookup file endpoint
@@ -850,63 +855,154 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 
 		logger.Debug("Downloading lookup file", "filename", filename, "url", fileURL)
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+		// First, do a HEAD request to check if file exists and get expected size
+		// This helps distinguish "file doesn't exist" from "download failed"
+		headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, fileURL, nil)
 		if err != nil {
-			logger.Warn("Failed to create request for lookup file", "filename", filename, "error", err)
+			logger.Warn("Failed to create HEAD request", "filename", filename, "error", err)
+			failedDownloads = append(failedDownloads, filename)
 			continue
 		}
+		headReq.Header.Set("Authorization", "Bearer "+accessToken)
 
-		// Set authorization header with the access token
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("Accept", "application/octet-stream")
-
-		resp, err := httpClient.Do(req)
+		headResp, err := httpClient.Do(headReq)
 		if err != nil {
-			logger.Warn("Failed to download lookup file", "filename", filename, "error", err)
+			logger.Warn("HEAD request failed", "filename", filename, "error", err)
+			// Can't determine if file exists - treat as potential data loss risk
+			failedDownloads = append(failedDownloads, filename)
 			continue
 		}
+		headResp.Body.Close()
 
-		if resp.StatusCode == http.StatusNotFound {
+		if headResp.StatusCode == http.StatusNotFound {
 			logger.Debug("Lookup file not found (will be created)", "filename", filename)
-			resp.Body.Close()
-			continue
+			continue // File doesn't exist - no risk of data loss
 		}
 
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			logger.Warn("Failed to download lookup file",
+		if headResp.StatusCode != http.StatusOK {
+			logger.Warn("HEAD request returned unexpected status",
 				"filename", filename,
-				"status", resp.StatusCode,
-				"body", string(body))
+				"status", headResp.StatusCode)
+			failedDownloads = append(failedDownloads, filename)
 			continue
 		}
 
-		// Stream file content directly to disk instead of loading into memory
-		tempFilePath := filepath.Join(tempDir, "existing_"+filename)
-		tempFile, err := os.Create(tempFilePath)
-		if err != nil {
-			resp.Body.Close()
-			logger.Warn("Failed to create temp file for lookup", "filename", filename, "error", err)
-			continue
-		}
-
-		// Use buffered copy to stream efficiently
-		bytesWritten, err := io.Copy(tempFile, resp.Body)
-		resp.Body.Close()
-		tempFile.Close()
-
-		if err != nil {
-			os.Remove(tempFilePath)
-			logger.Warn("Failed to stream lookup file to disk", "filename", filename, "error", err)
-			continue
-		}
-
-		existingFilePaths[filename] = tempFilePath
-		logger.Info("Downloaded existing lookup file to disk",
+		// File exists - get expected size for verification
+		expectedSize := headResp.ContentLength
+		logger.Info("File exists, starting download",
 			"filename", filename,
-			"temp_path", tempFilePath,
-			"size_bytes", bytesWritten)
+			"expected_size_bytes", expectedSize,
+			"expected_size_mb", float64(expectedSize)/(1024*1024))
+
+		// Retry logic: try up to 3 times for transient network errors
+		var lastErr error
+		var downloaded bool
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			if attempt > 1 {
+				// Wait before retry with exponential backoff (2s, 4s, 8s)
+				backoff := time.Duration(1<<uint(attempt-1)) * 2 * time.Second
+				logger.Info("Retrying download after backoff",
+					"filename", filename,
+					"attempt", attempt,
+					"backoff", backoff)
+				time.Sleep(backoff)
+			}
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+			if err != nil {
+				lastErr = fmt.Errorf("failed to create request: %w", err)
+				continue
+			}
+
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+			req.Header.Set("Accept", "application/octet-stream")
+
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				lastErr = fmt.Errorf("HTTP request failed: %w", err)
+				logger.Warn("Download attempt failed",
+					"filename", filename,
+					"attempt", attempt,
+					"error", err)
+				continue
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+				logger.Warn("Download attempt failed with HTTP error",
+					"filename", filename,
+					"attempt", attempt,
+					"status", resp.StatusCode)
+				continue
+			}
+
+			// Stream file content directly to disk
+			tempFilePath := filepath.Join(tempDir, "existing_"+filename)
+			tempFile, err := os.Create(tempFilePath)
+			if err != nil {
+				resp.Body.Close()
+				lastErr = fmt.Errorf("failed to create temp file: %w", err)
+				continue
+			}
+
+			// Use buffered copy to stream efficiently
+			bytesWritten, err := io.Copy(tempFile, resp.Body)
+			resp.Body.Close()
+			tempFile.Close()
+
+			if err != nil {
+				os.Remove(tempFilePath)
+				lastErr = fmt.Errorf("stream failed after %d bytes: %w", bytesWritten, err)
+				logger.Warn("Download stream failed",
+					"filename", filename,
+					"attempt", attempt,
+					"bytes_written", bytesWritten,
+					"expected_bytes", expectedSize,
+					"error", err)
+				continue
+			}
+
+			// Verify downloaded size matches expected size (if known)
+			if expectedSize > 0 && bytesWritten != expectedSize {
+				os.Remove(tempFilePath)
+				lastErr = fmt.Errorf("size mismatch: got %d bytes, expected %d bytes", bytesWritten, expectedSize)
+				logger.Warn("Download size mismatch",
+					"filename", filename,
+					"attempt", attempt,
+					"bytes_written", bytesWritten,
+					"expected_bytes", expectedSize)
+				continue
+			}
+
+			// Success!
+			existingFilePaths[filename] = tempFilePath
+			logger.Info("Downloaded existing lookup file to disk",
+				"filename", filename,
+				"temp_path", tempFilePath,
+				"size_bytes", bytesWritten,
+				"attempts", attempt)
+			downloaded = true
+			break
+		}
+
+		// File existed but all retries failed - this is a data loss risk
+		if !downloaded {
+			logger.Error("Failed to download existing lookup file after all retries",
+				"filename", filename,
+				"max_retries", maxRetries,
+				"expected_size_bytes", expectedSize,
+				"error", lastErr)
+			failedDownloads = append(failedDownloads, filename)
+		}
+	}
+
+	// If any existing files failed to download, abort to prevent data loss
+	if len(failedDownloads) > 0 {
+		return nil, fmt.Errorf("download failed for %d existing file(s) after %d retries each: %v - aborting to prevent data loss",
+			len(failedDownloads), maxRetries, failedDownloads)
 	}
 
 	return existingFilePaths, nil
@@ -1486,6 +1582,25 @@ func processIOCsToCSV(iocs []IOC, tempDir string, existingFilePaths map[string]s
 
 		fileSize := fileInfo.Size()
 		fileSizeMB := float64(fileSize) / (1024 * 1024)
+
+		// SAFETY CHECK: If existing file was present, verify new file isn't dramatically smaller
+		// This prevents data loss if something went wrong during download or processing
+		if existingFilePath != "" {
+			existingFileInfo, err := os.Stat(existingFilePath)
+			if err == nil {
+				existingSize := existingFileInfo.Size()
+				// If new file is less than 10% of existing file size, something is wrong
+				// (unless existing file was tiny, i.e., < 10KB)
+				if existingSize > 10*1024 && fileSize < existingSize/10 {
+					return nil, stats, fmt.Errorf(
+						"SAFETY CHECK FAILED: new file %s (%.2f MB, %d records) is dramatically smaller than "+
+							"existing file (%.2f MB). This likely indicates data loss. "+
+							"Aborting to protect existing data. Check download logs for errors",
+						filename, fileSizeMB, rowsWritten,
+						float64(existingSize)/(1024*1024))
+				}
+			}
+		}
 
 		if fileSize > MaxUploadSizeBytes {
 			return nil, stats, fmt.Errorf(
