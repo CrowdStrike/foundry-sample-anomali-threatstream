@@ -855,48 +855,11 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 
 		logger.Debug("Downloading lookup file", "filename", filename, "url", fileURL)
 
-		// First, do a HEAD request to check if file exists and get expected size
-		// This helps distinguish "file doesn't exist" from "download failed"
-		headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, fileURL, nil)
-		if err != nil {
-			logger.Warn("Failed to create HEAD request", "filename", filename, "error", err)
-			failedDownloads = append(failedDownloads, filename)
-			continue
-		}
-		headReq.Header.Set("Authorization", "Bearer "+accessToken)
-
-		headResp, err := httpClient.Do(headReq)
-		if err != nil {
-			logger.Warn("HEAD request failed", "filename", filename, "error", err)
-			// Can't determine if file exists - treat as potential data loss risk
-			failedDownloads = append(failedDownloads, filename)
-			continue
-		}
-		headResp.Body.Close()
-
-		if headResp.StatusCode == http.StatusNotFound {
-			logger.Debug("Lookup file not found (will be created)", "filename", filename)
-			continue // File doesn't exist - no risk of data loss
-		}
-
-		if headResp.StatusCode != http.StatusOK {
-			logger.Warn("HEAD request returned unexpected status",
-				"filename", filename,
-				"status", headResp.StatusCode)
-			failedDownloads = append(failedDownloads, filename)
-			continue
-		}
-
-		// File exists - get expected size for verification
-		expectedSize := headResp.ContentLength
-		logger.Info("File exists, starting download",
-			"filename", filename,
-			"expected_size_bytes", expectedSize,
-			"expected_size_mb", float64(expectedSize)/(1024*1024))
-
 		// Retry logic: try up to 3 times for transient network errors
+		// Note: We use GET directly instead of HEAD because NGSIEM returns 405 for HEAD requests
 		var lastErr error
 		var downloaded bool
+		var fileNotFound bool
 
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			if attempt > 1 {
@@ -928,6 +891,14 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 				continue
 			}
 
+			// Handle 404 - file doesn't exist (not an error, just means new file will be created)
+			if resp.StatusCode == http.StatusNotFound {
+				resp.Body.Close()
+				logger.Debug("Lookup file not found (will be created)", "filename", filename)
+				fileNotFound = true
+				break // Exit retry loop - no need to retry for non-existent files
+			}
+
 			if resp.StatusCode != http.StatusOK {
 				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
@@ -938,6 +909,13 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 					"status", resp.StatusCode)
 				continue
 			}
+
+			// Get expected size from Content-Length header for verification
+			expectedSize := resp.ContentLength
+			logger.Info("File exists, downloading",
+				"filename", filename,
+				"expected_size_bytes", expectedSize,
+				"expected_size_mb", float64(expectedSize)/(1024*1024))
 
 			// Stream file content directly to disk
 			tempFilePath := filepath.Join(tempDir, "existing_"+filename)
@@ -988,12 +966,16 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 			break
 		}
 
+		// Skip files that don't exist - no data loss risk
+		if fileNotFound {
+			continue
+		}
+
 		// File existed but all retries failed - this is a data loss risk
 		if !downloaded {
 			logger.Error("Failed to download existing lookup file after all retries",
 				"filename", filename,
 				"max_retries", maxRetries,
-				"expected_size_bytes", expectedSize,
 				"error", lastErr)
 			failedDownloads = append(failedDownloads, filename)
 		}
