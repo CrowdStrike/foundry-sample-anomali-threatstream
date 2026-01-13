@@ -52,10 +52,8 @@ from logging import Logger
 from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse, parse_qs
 
-import requests as http_requests
-
 from crowdstrike.foundry.function import Function, Request, Response, APIError
-from falconpy import APIIntegrations, NGSIEM, APIHarnessV2, OAuth2
+from falconpy import APIIntegrations, NGSIEM, APIHarnessV2
 
 
 FUNC = Function.instance()
@@ -535,14 +533,14 @@ def download_existing_lookup_files_locally(
 def download_existing_lookup_files_from_ngsiem(
     repository: str, ioc_type: Optional[str], temp_dir: str, logger: Logger
 ) -> Dict[str, str]:
-    """Download existing lookup files to disk using streaming HTTP (returns filename -> path)
+    """Download existing lookup files to disk using FalconPy streaming (returns filename -> path)
 
-    Uses streaming HTTP with OAuth2 token from FalconPy to download files directly
-    to disk. This keeps memory usage constant (~3-5MB) regardless of file size,
+    Uses NGSIEM.get_file(stream=True) to download files directly to disk.
+    This keeps memory usage constant (~3-5MB) regardless of file size,
     enabling processing of files up to the 200MB NGSIEM limit.
 
     Resilience features:
-    - Streaming GET with Content-Length verification (HEAD not supported by NGSIEM)
+    - Streaming download with Content-Length verification
     - Retry with exponential backoff (3 attempts) for transient errors
     - Size verification to detect incomplete downloads
     - Aborts if any existing file fails to download (prevents data loss)
@@ -590,28 +588,11 @@ def download_existing_lookup_files_from_ngsiem(
         logger.info(f"Attempting to download {len(filenames_to_try)} existing Anomali lookup files" +
                    (f" for type '{ioc_type}'" if ioc_type else ""))
 
-        # Get OAuth2 token from FalconPy for streaming HTTP requests
-        auth = OAuth2()
-        token_response = auth.token()
-        if token_response["status_code"] != 201:
-            logger.error(f"Failed to get OAuth2 token: {token_response}")
-            # Fall back to FalconPy SDK if token fails
-            return _download_files_via_sdk(repository, filenames_to_try, temp_dir, logger)
-
-        access_token = token_response["body"]["access_token"]
-        base_url = os.environ.get("CS_CLOUD", "https://api.crowdstrike.com")
-
-        # Use longer timeout for large files: 200MB at 350KB/s = 9.5 minutes
-        download_timeout = 600  # 10 minutes
+        # Use FalconPy NGSIEM client with streaming support
+        ngsiem = NGSIEM()
 
         for filename in filenames_to_try:
-            # Build the download URL
-            url = f"{base_url}/loggingapi/entities/lookup-files/v1"
-            headers = {"Authorization": f"Bearer {access_token}"}
-            params = {"repository": repository, "filename": filename}
-
             # Retry logic for download
-            # Note: We use GET directly instead of HEAD because NGSIEM returns 405 for HEAD requests
             last_error = None
             downloaded = False
             file_not_found = False
@@ -625,51 +606,74 @@ def download_existing_lookup_files_from_ngsiem(
                     time.sleep(backoff)
 
                 try:
-                    with http_requests.get(url, headers=headers, params=params,
-                                           stream=True, timeout=download_timeout) as resp:
-                        # Handle 404 - file doesn't exist (not an error, just skip)
-                        if resp.status_code == 404:
+                    # Use FalconPy's streaming support
+                    resp = ngsiem.get_file(
+                        repository=repository,
+                        filename=filename,
+                        stream=True
+                    )
+
+                    # Handle 404 - file doesn't exist (not an error, just skip)
+                    if hasattr(resp, 'status_code') and resp.status_code == 404:
+                        logger.info(f"File {filename} not found (will be created)")
+                        file_not_found = True
+                        break  # Exit retry loop - no need to retry for non-existent files
+
+                    # Check for error responses (dict with status_code)
+                    if isinstance(resp, dict):
+                        status = resp.get("status_code", 0)
+                        if status == 404:
                             logger.info(f"File {filename} not found (will be created)")
                             file_not_found = True
-                            break  # Exit retry loop - no need to retry for non-existent files
-
-                        if resp.status_code != 200:
-                            last_error = f"HTTP {resp.status_code}"
+                            break
+                        if status != 200:
+                            last_error = f"HTTP {status}"
                             logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
                             continue
 
-                        # Get expected size from Content-Length header for verification
+                    # For streaming response, check status_code attribute
+                    if hasattr(resp, 'status_code') and resp.status_code != 200:
+                        last_error = f"HTTP {resp.status_code}"
+                        logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
+                        continue
+
+                    # Get expected size from Content-Length header for verification
+                    expected_size = 0
+                    if hasattr(resp, 'headers'):
                         expected_size = int(resp.headers.get("Content-Length", 0))
                         logger.info(f"File exists: {filename}, downloading {expected_size:,} bytes "
                                    f"({expected_size / (1024*1024):.2f} MB)")
 
-                        dest_path = os.path.join(temp_dir, f"existing_{filename}")
-                        bytes_written = 0
+                    dest_path = os.path.join(temp_dir, f"existing_{filename}")
+                    bytes_written = 0
 
-                        with open(dest_path, 'wb') as f:
+                    # Stream to disk
+                    with open(dest_path, 'wb') as f:
+                        if hasattr(resp, 'iter_content'):
+                            # Streaming response
                             for chunk in resp.iter_content(chunk_size=8192):
                                 if chunk:
                                     f.write(chunk)
                                     bytes_written += len(chunk)
+                        elif isinstance(resp, bytes):
+                            # Non-streaming fallback (shouldn't happen with stream=True)
+                            f.write(resp)
+                            bytes_written = len(resp)
 
-                        # Verify downloaded size matches expected size (if known)
-                        if expected_size > 0 and bytes_written != expected_size:
-                            os.remove(dest_path)
-                            last_error = f"Size mismatch: got {bytes_written}, expected {expected_size}"
-                            logger.warning(f"Download attempt {attempt} for {filename}: {last_error}")
-                            continue
+                    # Verify downloaded size matches expected size (if known)
+                    if expected_size > 0 and bytes_written != expected_size:
+                        os.remove(dest_path)
+                        last_error = f"Size mismatch: got {bytes_written}, expected {expected_size}"
+                        logger.warning(f"Download attempt {attempt} for {filename}: {last_error}")
+                        continue
 
-                        # Success!
-                        existing_files[filename] = dest_path
-                        logger.info(f"Downloaded {filename} to disk ({bytes_written:,} bytes, "
-                                   f"attempt {attempt})")
-                        downloaded = True
-                        break
+                    # Success!
+                    existing_files[filename] = dest_path
+                    logger.info(f"Downloaded {filename} to disk ({bytes_written:,} bytes, "
+                               f"attempt {attempt})")
+                    downloaded = True
+                    break
 
-                except http_requests.exceptions.RequestException as e:
-                    last_error = str(e)
-                    logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
-                    continue
                 except Exception as e:
                     last_error = str(e)
                     logger.warning(f"Error on download attempt {attempt} for {filename}: {last_error}")
@@ -695,38 +699,6 @@ def download_existing_lookup_files_from_ngsiem(
             f"Download failed for {len(failed_downloads)} existing file(s) after {max_retries} "
             f"retries each: {failed_downloads} - aborting to prevent data loss"
         )
-
-    return existing_files
-
-
-def _download_files_via_sdk(
-    repository: str, filenames: List[str], temp_dir: str, logger: Logger
-) -> Dict[str, str]:
-    """Fallback: download files via FalconPy SDK (loads into memory first)"""
-    ngsiem = NGSIEM()
-    existing_files = {}
-
-    for filename in filenames:
-        try:
-            logger.info(f"SDK fallback: downloading {filename}")
-            download_response = ngsiem.get_file(
-                repository=repository,
-                filename=filename
-            )
-
-            if isinstance(download_response, bytes):
-                # Write bytes to temp file
-                dest_path = os.path.join(temp_dir, f"existing_{filename}")
-                with open(dest_path, 'wb') as f:
-                    f.write(download_response)
-                existing_files[filename] = dest_path
-                logger.info(f"SDK downloaded {filename} ({len(download_response):,} bytes)")
-            elif isinstance(download_response, dict) and download_response.get("status_code") != 200:
-                logger.info(f"File {filename} not found: {download_response.get('status_code')}")
-
-        except Exception as e:
-            logger.info(f"SDK fallback error for {filename}: {str(e)}")
-            continue
 
     return existing_files
 
