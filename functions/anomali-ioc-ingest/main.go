@@ -1448,6 +1448,21 @@ func fetchIOCsFromAnomali(ctx context.Context, falconClient *client.CrowdStrikeA
 			}
 		}
 
+		// Debug: Log the response structure to diagnose total_count extraction
+		if m, ok := response.Payload.(map[string]interface{}); ok {
+			// Check if total_count is at top level
+			if tc, ok := m["total_count"]; ok {
+				logger.Info("Found total_count at top level", "total_count", tc)
+				meta["total_count"] = tc
+			}
+			// Log all top-level keys in the response
+			topLevelKeys := make([]string, 0, len(m))
+			for k := range m {
+				topLevelKeys = append(topLevelKeys, k)
+			}
+			logger.Info("Response structure", "top_level_keys", topLevelKeys, "meta_contents", meta)
+		}
+
 		logger.Info("Fetched IOCs from Anomali", "count", len(iocs))
 		return iocs, meta, nil
 	}
