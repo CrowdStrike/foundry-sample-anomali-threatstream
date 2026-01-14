@@ -1502,6 +1502,9 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         confidence_lt = request.body.get("confidence_lt", None)
         confidence_lte = request.body.get("confidence_lte", None)
 
+        # Parse fail-fast setting (disabled by default for testing)
+        fail_fast_enabled = request.body.get("fail_fast_enabled", False)
+
         # Parse type filter - only support single type or no type
         type_filter = request.body.get("type", None)  # Single IOC type filter
         if type_filter and ',' in str(type_filter):
@@ -1635,13 +1638,15 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
                 # Fail-fast check: estimate final file sizes on first execution
                 # This prevents wasting hours on pagination only to fail at the end
-                total_count = meta.get("total_count", 0) if meta else 0
-                size_limit_error = estimate_final_file_sizes(
-                    csv_files, len(iocs), total_count, existing_files, logger
-                )
-                if size_limit_error:
-                    logger.error(size_limit_error)
-                    raise FileSizeLimitError(size_limit_error)
+                # Disabled by default - set fail_fast_enabled=true to enable
+                if fail_fast_enabled:
+                    total_count = meta.get("total_count", 0) if meta else 0
+                    size_limit_error = estimate_final_file_sizes(
+                        csv_files, len(iocs), total_count, existing_files, logger
+                    )
+                    if size_limit_error:
+                        logger.error(size_limit_error)
+                        raise FileSizeLimitError(size_limit_error)
 
                 # Phase 4: Upload CSV files to Falcon Next-Gen SIEM
                 phase4_start = time.time()
