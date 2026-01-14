@@ -83,6 +83,90 @@ class FileSizeLimitError(AnomaliFunctionError):
     """Exception raised when a lookup file exceeds the NGSIEM upload size limit."""
 
 
+def estimate_final_file_sizes(
+    csv_files: List[str],
+    iocs_in_batch: int,
+    total_count: int,
+    existing_files: Dict[str, str],
+    logger: Logger
+) -> Optional[str]:
+    """
+    Estimate final file sizes based on first batch and return error message if limit will be exceeded.
+
+    This fail-fast check prevents wasting time on pagination when the final file size
+    will exceed the 200 MB NGSIEM limit. Only runs on first execution (no existing files).
+
+    Returns:
+        Error message string if limit will be exceeded, None otherwise.
+    """
+    # Only run this check on first execution (no existing files)
+    if existing_files:
+        return None
+
+    # Need at least some IOCs to estimate
+    if iocs_in_batch == 0 or total_count == 0:
+        return None
+
+    # Calculate distribution and projected sizes for each file
+    projections = []
+    for filepath in csv_files:
+        filename = os.path.basename(filepath)
+        file_size = os.path.getsize(filepath)
+        file_size_mb = file_size / (1024 * 1024)
+
+        # Count records in this file (subtract 1 for header)
+        with open(filepath, 'r', encoding='utf-8') as f:
+            record_count = sum(1 for _ in f) - 1
+
+        if record_count <= 0:
+            continue
+
+        # Calculate bytes per record for this file type
+        bytes_per_record = file_size / record_count
+
+        # Calculate what percentage of the batch went to this file
+        distribution_pct = record_count / iocs_in_batch
+
+        # Project total records for this file type
+        projected_records = int(total_count * distribution_pct)
+
+        # Project final file size
+        projected_size = projected_records * bytes_per_record
+        projected_size_mb = projected_size / (1024 * 1024)
+
+        logger.info(
+            f"File size projection: {filename} - "
+            f"current: {record_count:,} records ({file_size_mb:.1f} MB), "
+            f"distribution: {distribution_pct:.1%}, "
+            f"projected: {projected_records:,} records ({projected_size_mb:.1f} MB)"
+        )
+
+        if projected_size > MAX_UPLOAD_SIZE_BYTES:
+            projections.append({
+                "filename": filename,
+                "projected_records": projected_records,
+                "projected_size_mb": projected_size_mb,
+                "distribution_pct": distribution_pct
+            })
+
+    if projections:
+        # Build error message for files that will exceed limit
+        file_details = ", ".join([
+            f"{p['filename']} (~{p['projected_size_mb']:.0f} MB with {p['projected_records']:,} records)"
+            for p in projections
+        ])
+        return (
+            f"Projected file size will exceed 200 MB NGSIEM limit. "
+            f"Based on first batch distribution: {file_details}. "
+            f"Total IOCs matching query: {total_count:,}. "
+            f"To reduce dataset size, configure the workflow to use filters: "
+            f"1) Use 'feed_id' to limit ingestion to specific threat feeds, "
+            f"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70)."
+        )
+
+    return None
+
+
 # IOC type mappings for CSV column headers
 IOC_TYPE_MAPPINGS = {
     "ip": {
@@ -959,9 +1043,9 @@ def process_iocs_to_csv(
                 f"File {filename} ({file_size_mb:.1f} MB) exceeds the NGSIEM upload limit of 200 MB. "
                 f"The file contains {rows_written:,} IOC records. "
                 f"To reduce file size, configure the workflow to use filters: "
-                f"1) Use 'type' parameter to ingest specific IOC types separately, "
+                f"1) Use 'feed_id' to limit ingestion to specific threat feeds, "
                 f"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70), "
-                f"3) Use 'feed_id' to limit ingestion to specific threat feeds."
+                f"3) Use 'type' parameter to ingest specific IOC types separately."
             )
             logger.error(error_msg)
             raise FileSizeLimitError(error_msg)
@@ -1548,6 +1632,16 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                         },
                         code=200
                     )
+
+                # Fail-fast check: estimate final file sizes on first execution
+                # This prevents wasting hours on pagination only to fail at the end
+                total_count = meta.get("total_count", 0) if meta else 0
+                size_limit_error = estimate_final_file_sizes(
+                    csv_files, len(iocs), total_count, existing_files, logger
+                )
+                if size_limit_error:
+                    logger.error(size_limit_error)
+                    raise FileSizeLimitError(size_limit_error)
 
                 # Phase 4: Upload CSV files to Falcon Next-Gen SIEM
                 phase4_start = time.time()
