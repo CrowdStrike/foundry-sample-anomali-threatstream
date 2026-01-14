@@ -187,6 +187,7 @@ func isTestMode() bool {
 
 func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *slog.Logger) fdk.Response {
 	req := r.Body
+	startTime := time.Now()
 
 	// Set defaults
 	repository := req.Repository
@@ -208,11 +209,18 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		})
 	}
 
+	// Log all request parameters for debugging
 	logger.Info("Starting IOC ingestion",
 		"repository", repository,
 		"type", req.Type,
 		"next", req.Next,
 		"limit", limit,
+		"status_filter", req.Status,
+		"feed_id", req.FeedID,
+		"trusted_circles", req.TrustedCircles,
+		"confidence_gte", req.ConfidenceGte,
+		"confidence_gt", req.ConfidenceGt,
+		"update_id_gt", req.UpdateIDGt,
 	)
 
 	// Create temp directory early for file downloads and processing
@@ -236,11 +244,26 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	}
 
 	// Check for existing files and handle missing file recovery
+	downloadStartTime := time.Now()
+	logger.Info("Phase 1: Checking for existing lookup files")
 	shouldStartFresh, existingFilePaths, err := checkAndRecoverMissingFiles(ctx, falconClient, r.AccessToken, repository, req.Type, tempDir, logger)
+	downloadDuration := time.Since(downloadStartTime)
 	if err != nil {
-		logger.Warn("Error checking for missing files, starting fresh", "error", err)
-		existingFilePaths = make(map[string]string)
+		// CRITICAL: Do NOT swallow this error! If downloads failed, we must abort
+		// to prevent data loss. The error message already says "aborting to prevent data loss"
+		// so we must actually abort, not just log and continue.
+		logger.Error("Failed to download existing files - aborting to prevent data loss",
+			"error", err,
+			"duration_seconds", downloadDuration.Seconds())
+		return fdk.ErrResp(fdk.APIError{
+			Code:    500,
+			Message: fmt.Sprintf("Download failed: %v. Please retry later.", err),
+		})
 	}
+	logger.Info("Phase 1 complete: Existing files checked",
+		"files_downloaded", len(existingFilePaths),
+		"should_start_fresh", shouldStartFresh,
+		"duration_seconds", downloadDuration.Seconds())
 
 	if shouldStartFresh {
 		logger.Info("Starting completely fresh sync - clearing all collection data")
@@ -286,9 +309,14 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	}
 
 	// Fetch IOCs from Anomali via API integration
+	fetchStartTime := time.Now()
+	logger.Info("Phase 2: Fetching IOCs from Anomali API")
 	iocs, meta, err := fetchIOCsFromAnomali(ctx, falconClient, r, job, logger)
+	fetchDuration := time.Since(fetchStartTime)
 	if err != nil {
-		logger.Error("Failed to fetch IOCs from Anomali", "error", err)
+		logger.Error("Failed to fetch IOCs from Anomali",
+			"error", err,
+			"duration_seconds", fetchDuration.Seconds())
 		if job != nil {
 			job.State = JobFailed
 			job.Error = err.Error()
@@ -299,6 +327,9 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 			Message: fmt.Sprintf("Failed to fetch IOCs: %v", err),
 		})
 	}
+	logger.Info("Phase 2 complete: IOCs fetched from Anomali",
+		"ioc_count", len(iocs),
+		"duration_seconds", fetchDuration.Seconds())
 
 	if len(iocs) == 0 {
 		// Mark job as completed even with no data
@@ -306,6 +337,9 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 			job.State = JobCompleted
 			_ = updateJob(ctx, falconClient, job, logger)
 		}
+		totalDuration := time.Since(startTime)
+		logger.Info("Ingestion complete - no IOCs found",
+			"total_duration_seconds", totalDuration.Seconds())
 
 		return fdk.Response{
 			Code: 200,
@@ -321,8 +355,14 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	}
 
 	// Process IOCs into CSV files (tempDir already created earlier)
+	processStartTime := time.Now()
+	logger.Info("Phase 3: Processing IOCs into CSV files")
 	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
+	processDuration := time.Since(processStartTime)
 	if err != nil {
+		logger.Error("Failed to process IOCs into CSV",
+			"error", err,
+			"duration_seconds", processDuration.Seconds())
 		if job != nil {
 			job.State = JobFailed
 			job.Error = err.Error()
@@ -333,11 +373,25 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 			Message: fmt.Sprintf("Failed to process IOCs: %v", err),
 		})
 	}
+	logger.Info("Phase 3 complete: CSV files created",
+		"files_created", len(csvFiles),
+		"new_iocs", stats.TotalNewIOCs,
+		"duplicates_updated", stats.TotalDuplicatesRemoved,
+		"duration_seconds", processDuration.Seconds())
 
 	// Upload CSV files to NGSIEM
+	uploadStartTime := time.Now()
+	logger.Info("Phase 4: Uploading CSV files to NGSIEM")
 	uploadResults, err := uploadCSVFilesToNGSIEM(ctx, falconClient, csvFiles, repository, logger)
+	uploadDuration := time.Since(uploadStartTime)
 	if err != nil {
-		logger.Error("Failed to upload files", "error", err)
+		logger.Error("Failed to upload files",
+			"error", err,
+			"duration_seconds", uploadDuration.Seconds())
+	} else {
+		logger.Info("Phase 4 complete: Files uploaded to NGSIEM",
+			"files_uploaded", len(uploadResults),
+			"duration_seconds", uploadDuration.Seconds())
 	}
 
 	// Update collections with latest state
@@ -351,6 +405,10 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		}
 		if err := saveUpdateID(ctx, falconClient, updateData, req.Type, logger); err != nil {
 			logger.Error("Failed to save update_id", "error", err)
+		} else {
+			logger.Info("Saved update_id for incremental sync",
+				"type", req.Type,
+				"update_id", maxUpdateID)
 		}
 	}
 
@@ -359,6 +417,19 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		job.State = JobCompleted
 		_ = updateJob(ctx, falconClient, job, logger)
 	}
+
+	// Calculate total duration and log summary
+	totalDuration := time.Since(startTime)
+	logger.Info("Ingestion complete - SUCCESS",
+		"total_iocs_processed", len(iocs),
+		"files_created", len(csvFiles),
+		"new_iocs", stats.TotalNewIOCs,
+		"duplicates_updated", stats.TotalDuplicatesRemoved,
+		"total_duration_seconds", totalDuration.Seconds(),
+		"download_duration_seconds", downloadDuration.Seconds(),
+		"fetch_duration_seconds", fetchDuration.Seconds(),
+		"process_duration_seconds", processDuration.Seconds(),
+		"upload_duration_seconds", uploadDuration.Seconds())
 
 	// Build response
 	response := IngestResponse{
@@ -844,7 +915,9 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 
 	// Track files that existed but failed to download (to prevent data loss)
 	failedDownloads := []string{}
-	const maxRetries = 3
+	// Increase retries to 5 for large files that may fail with network issues
+	// Backoff: 5s, 10s, 20s, 40s, 60s (capped) - total wait up to 135s between attempts
+	const maxRetries = 5
 
 	for _, filename := range knownFilenames {
 		// Build the URL for the lookup file endpoint
@@ -855,7 +928,7 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 
 		logger.Debug("Downloading lookup file", "filename", filename, "url", fileURL)
 
-		// Retry logic: try up to 3 times for transient network errors
+		// Retry logic: try up to 5 times for transient network errors
 		// Note: We use GET directly instead of HEAD because NGSIEM returns 405 for HEAD requests
 		var lastErr error
 		var downloaded bool
@@ -863,12 +936,18 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			if attempt > 1 {
-				// Wait before retry with exponential backoff (2s, 4s, 8s)
-				backoff := time.Duration(1<<uint(attempt-1)) * 2 * time.Second
+				// Wait before retry with exponential backoff (5s, 10s, 20s, 40s, 60s cap)
+				// Longer backoffs give network infrastructure time to recover
+				backoffSeconds := 5 * (1 << uint(attempt-2)) // 5, 10, 20, 40...
+				if backoffSeconds > 60 {
+					backoffSeconds = 60 // Cap at 60 seconds
+				}
+				backoff := time.Duration(backoffSeconds) * time.Second
 				logger.Info("Retrying download after backoff",
 					"filename", filename,
 					"attempt", attempt,
-					"backoff", backoff)
+					"max_attempts", maxRetries,
+					"backoff_seconds", backoffSeconds)
 				time.Sleep(backoff)
 			}
 
@@ -912,10 +991,12 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 
 			// Get expected size from Content-Length header for verification
 			expectedSize := resp.ContentLength
-			logger.Info("File exists, downloading",
+			logger.Info("File exists, starting download",
 				"filename", filename,
 				"expected_size_bytes", expectedSize,
-				"expected_size_mb", float64(expectedSize)/(1024*1024))
+				"expected_size_mb", float64(expectedSize)/(1024*1024),
+				"attempt", attempt,
+				"max_attempts", maxRetries)
 
 			// Stream file content directly to disk
 			tempFilePath := filepath.Join(tempDir, "existing_"+filename)
@@ -926,19 +1007,31 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 				continue
 			}
 
+			// Use progress reader for large files (>10MB) to track download progress
+			// This helps diagnose "unexpected EOF" issues by showing where downloads stall
+			var reader io.Reader = resp.Body
+			if expectedSize > 10*1024*1024 {
+				reader = newProgressReader(resp.Body, expectedSize, filename, logger)
+			}
+
 			// Use buffered copy to stream efficiently
-			bytesWritten, err := io.Copy(tempFile, resp.Body)
+			bytesWritten, err := io.Copy(tempFile, reader)
 			resp.Body.Close()
 			tempFile.Close()
 
 			if err != nil {
 				os.Remove(tempFilePath)
-				lastErr = fmt.Errorf("stream failed after %d bytes: %w", bytesWritten, err)
+				percentComplete := float64(0)
+				if expectedSize > 0 {
+					percentComplete = float64(bytesWritten) / float64(expectedSize) * 100
+				}
+				lastErr = fmt.Errorf("stream failed after %d bytes (%.1f%%): %w", bytesWritten, percentComplete, err)
 				logger.Warn("Download stream failed",
 					"filename", filename,
 					"attempt", attempt,
 					"bytes_written", bytesWritten,
 					"expected_bytes", expectedSize,
+					"percent_complete", fmt.Sprintf("%.1f%%", percentComplete),
 					"error", err)
 				continue
 			}
@@ -961,6 +1054,7 @@ func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, i
 				"filename", filename,
 				"temp_path", tempFilePath,
 				"size_bytes", bytesWritten,
+				"size_mb", float64(bytesWritten)/(1024*1024),
 				"attempts", attempt)
 			downloaded = true
 			break
@@ -1707,6 +1801,46 @@ type namedFile struct {
 
 func (f *namedFile) Name() string {
 	return f.name
+}
+
+// progressReader wraps an io.Reader to track and log download progress
+type progressReader struct {
+	reader       io.Reader
+	totalBytes   int64
+	readBytes    int64
+	lastLogBytes int64
+	filename     string
+	logger       *slog.Logger
+	logInterval  int64 // Log every N bytes (e.g., 10MB)
+}
+
+func newProgressReader(r io.Reader, total int64, filename string, logger *slog.Logger) *progressReader {
+	return &progressReader{
+		reader:      r,
+		totalBytes:  total,
+		filename:    filename,
+		logger:      logger,
+		logInterval: 10 * 1024 * 1024, // Log every 10MB
+	}
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.reader.Read(p)
+	pr.readBytes += int64(n)
+
+	// Log progress every 10MB
+	if pr.readBytes-pr.lastLogBytes >= pr.logInterval {
+		percentComplete := float64(pr.readBytes) / float64(pr.totalBytes) * 100
+		pr.logger.Info("Download progress",
+			"filename", pr.filename,
+			"bytes_downloaded", pr.readBytes,
+			"total_bytes", pr.totalBytes,
+			"percent_complete", fmt.Sprintf("%.1f%%", percentComplete),
+			"mb_downloaded", float64(pr.readBytes)/(1024*1024))
+		pr.lastLogBytes = pr.readBytes
+	}
+
+	return n, err
 }
 
 // uploadCSVFilesToNGSIEM uploads CSV files to Falcon Next-Gen SIEM as lookup files
