@@ -2647,3 +2647,85 @@ func TestParse207ResponseNilBody(t *testing.T) {
 		t.Error("Expected error for nil response body")
 	}
 }
+
+// TestEstimateFinalFileSizes tests the fail-fast file size estimation
+func TestEstimateFinalFileSizes(t *testing.T) {
+	logger := slog.Default()
+
+	t.Run("skips check when existing files present", func(t *testing.T) {
+		existingFiles := map[string]string{"test.csv": "/tmp/test.csv"}
+		err := estimateFinalFileSizes([]string{}, 100, 1000000, existingFiles, logger)
+		if err != nil {
+			t.Errorf("Expected nil error when existing files present, got: %v", err)
+		}
+	})
+
+	t.Run("skips check when no IOCs in batch", func(t *testing.T) {
+		err := estimateFinalFileSizes([]string{}, 0, 1000000, map[string]string{}, logger)
+		if err != nil {
+			t.Errorf("Expected nil error when no IOCs in batch, got: %v", err)
+		}
+	})
+
+	t.Run("skips check when totalCount is zero", func(t *testing.T) {
+		err := estimateFinalFileSizes([]string{}, 100, 0, map[string]string{}, logger)
+		if err != nil {
+			t.Errorf("Expected nil error when totalCount is zero, got: %v", err)
+		}
+	})
+
+	t.Run("returns nil when projected size under limit", func(t *testing.T) {
+		// Create a small test CSV file
+		tempDir := t.TempDir()
+		testFile := filepath.Join(tempDir, "anomali_threatstream_ip.csv")
+
+		// Write a small CSV with header + 10 rows (~500 bytes)
+		content := "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+		for i := 0; i < 10; i++ {
+			content += fmt.Sprintf("192.168.1.%d,85,malware,test,tag1,2026-12-31\n", i)
+		}
+		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+
+		// With 10 IOCs in batch and 1000 total, projected size should be ~50KB (well under 200MB)
+		err := estimateFinalFileSizes([]string{testFile}, 10, 1000, map[string]string{}, logger)
+		if err != nil {
+			t.Errorf("Expected nil error for small projected size, got: %v", err)
+		}
+	})
+
+	t.Run("returns error when projected size exceeds limit", func(t *testing.T) {
+		// Create a test CSV file
+		tempDir := t.TempDir()
+		testFile := filepath.Join(tempDir, "anomali_threatstream_ip.csv")
+
+		// Write a CSV with header + 100 rows (~5KB)
+		content := "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+		for i := 0; i < 100; i++ {
+			content += fmt.Sprintf("192.168.1.%d,85,malware,test,tag1,2026-12-31\n", i)
+		}
+		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create test file: %v", err)
+		}
+
+		// With 100 IOCs in batch and 100 million total, projected size should exceed 200MB
+		// 5KB / 100 records = 50 bytes/record
+		// 100,000,000 records * 50 bytes = 5GB (way over limit)
+		err := estimateFinalFileSizes([]string{testFile}, 100, 100000000, map[string]string{}, logger)
+		if err == nil {
+			t.Error("Expected error when projected size exceeds 200MB limit")
+		}
+		if err != nil && !strings.Contains(err.Error(), "200 MB") {
+			t.Errorf("Error should mention 200 MB limit, got: %v", err)
+		}
+	})
+
+	t.Run("handles missing file gracefully", func(t *testing.T) {
+		// Pass a non-existent file - should not panic, just skip
+		err := estimateFinalFileSizes([]string{"/nonexistent/file.csv"}, 100, 1000000, map[string]string{}, logger)
+		if err != nil {
+			t.Errorf("Expected nil error for missing file (should skip), got: %v", err)
+		}
+	})
+}
