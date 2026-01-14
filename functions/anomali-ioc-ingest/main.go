@@ -185,6 +185,103 @@ func isTestMode() bool {
 	return testMode == "true" || testMode == "1" || testMode == "yes"
 }
 
+// estimateFinalFileSizes checks if any file will exceed the 200 MB limit based on first batch.
+// This fail-fast check prevents wasting hours on pagination only to fail at the end.
+// Only runs on first execution (no existing files).
+func estimateFinalFileSizes(csvFiles []string, iocsInBatch int, totalCount int, existingFilePaths map[string]string, logger *slog.Logger) error {
+	// Only run this check on first execution (no existing files)
+	if len(existingFilePaths) > 0 {
+		return nil
+	}
+
+	// Need at least some IOCs to estimate
+	if iocsInBatch == 0 || totalCount == 0 {
+		return nil
+	}
+
+	type projection struct {
+		filename         string
+		projectedRecords int
+		projectedSizeMB  float64
+	}
+	var projections []projection
+
+	for _, filepath := range csvFiles {
+		filename := path.Base(filepath)
+
+		fileInfo, err := os.Stat(filepath)
+		if err != nil {
+			continue
+		}
+		fileSize := fileInfo.Size()
+		fileSizeMB := float64(fileSize) / (1024 * 1024)
+
+		// Count records in this file (subtract 1 for header)
+		file, err := os.Open(filepath)
+		if err != nil {
+			continue
+		}
+		recordCount := 0
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			recordCount++
+		}
+		file.Close()
+		recordCount-- // Subtract header
+
+		if recordCount <= 0 {
+			continue
+		}
+
+		// Calculate bytes per record for this file type
+		bytesPerRecord := float64(fileSize) / float64(recordCount)
+
+		// Calculate what percentage of the batch went to this file
+		distributionPct := float64(recordCount) / float64(iocsInBatch)
+
+		// Project total records for this file type
+		projectedRecords := int(float64(totalCount) * distributionPct)
+
+		// Project final file size
+		projectedSize := float64(projectedRecords) * bytesPerRecord
+		projectedSizeMB := projectedSize / (1024 * 1024)
+
+		logger.Info("File size projection",
+			"filename", filename,
+			"current_records", recordCount,
+			"current_size_mb", fileSizeMB,
+			"distribution_pct", distributionPct,
+			"projected_records", projectedRecords,
+			"projected_size_mb", projectedSizeMB)
+
+		if projectedSize > float64(MaxUploadSizeBytes) {
+			projections = append(projections, projection{
+				filename:         filename,
+				projectedRecords: projectedRecords,
+				projectedSizeMB:  projectedSizeMB,
+			})
+		}
+	}
+
+	if len(projections) > 0 {
+		// Build error message for files that will exceed limit
+		var fileDetails []string
+		for _, p := range projections {
+			fileDetails = append(fileDetails, fmt.Sprintf("%s (~%.0f MB with %d records)", p.filename, p.projectedSizeMB, p.projectedRecords))
+		}
+		return fmt.Errorf(
+			"projected file size will exceed 200 MB NGSIEM limit. "+
+				"Based on first batch distribution: %s. "+
+				"Total IOCs matching query: %d. "+
+				"To reduce dataset size, use filters: "+
+				"1) Use 'feed_id' to limit ingestion to specific threat feeds, "+
+				"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70).",
+			strings.Join(fileDetails, ", "), totalCount)
+	}
+
+	return nil
+}
+
 func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *slog.Logger) fdk.Response {
 	req := r.Body
 	startTime := time.Now()
@@ -378,6 +475,22 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"new_iocs", stats.TotalNewIOCs,
 		"duplicates_updated", stats.TotalDuplicatesRemoved,
 		"duration_seconds", processDuration.Seconds())
+
+	// Fail-fast check: estimate final file sizes on first execution
+	// This prevents wasting hours on pagination only to fail at the end
+	totalCount := getMetaTotalCount(meta)
+	if err := estimateFinalFileSizes(csvFiles, len(iocs), totalCount, existingFilePaths, logger); err != nil {
+		logger.Error("File size projection exceeds limit", "error", err)
+		if job != nil {
+			job.State = JobFailed
+			job.Error = err.Error()
+			_ = updateJob(ctx, falconClient, job, logger)
+		}
+		return fdk.ErrResp(fdk.APIError{
+			Code:    500,
+			Message: err.Error(),
+		})
+	}
 
 	// Upload CSV files to NGSIEM
 	uploadStartTime := time.Now()
@@ -1683,9 +1796,9 @@ func processIOCsToCSV(iocs []IOC, tempDir string, existingFilePaths map[string]s
 				"file %s (%.1f MB) exceeds the NGSIEM upload limit of 200 MB. "+
 					"The file contains %d IOC records. "+
 					"To reduce file size, use filters: "+
-					"1) Use 'type' parameter to ingest specific IOC types separately, "+
+					"1) Use 'feed_id' to limit ingestion to specific threat feeds, "+
 					"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70), "+
-					"3) Use 'feed_id' to limit ingestion to specific threat feeds.",
+					"3) Use 'type' parameter to ingest specific IOC types separately.",
 				filename, fileSizeMB, rowsWritten)
 		}
 
