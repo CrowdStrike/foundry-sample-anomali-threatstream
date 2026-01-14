@@ -156,7 +156,7 @@ def estimate_final_file_sizes(
             for p in projections
         ])
         return (
-            f"Projected file size will exceed 200 MB NGSIEM limit. "
+            f"The estimated file size will exceed the 200 MB NGSIEM API upload limit. "
             f"Based on first batch distribution: {file_details}. "
             f"Total IOCs matching query: {total_count:,}. "
             f"To reduce dataset size, configure the workflow to use filters: "
