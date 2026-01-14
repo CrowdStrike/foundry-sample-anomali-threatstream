@@ -75,6 +75,11 @@
     "next": {
       "type": "string",
       "description": "Continuation token for workflow pagination"
+    },
+    "fail_fast_enabled": {
+      "type": "boolean",
+      "description": "Enable early file size estimation to fail fast if projected size exceeds 200 MB limit",
+      "default": false
     }
   },
   "required": [],
