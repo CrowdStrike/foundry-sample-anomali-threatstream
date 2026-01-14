@@ -698,27 +698,22 @@ def download_existing_lookup_files_from_ngsiem(
                         stream=True
                     )
 
+                    # Extract status_code from response (handles both response object and dict)
+                    status_code = 0
+                    if hasattr(resp, 'status_code'):
+                        status_code = resp.status_code
+                    elif isinstance(resp, dict):
+                        status_code = resp.get("status_code", 0)
+
                     # Handle 404 - file doesn't exist (not an error, just skip)
-                    if hasattr(resp, 'status_code') and resp.status_code == 404:
+                    if status_code == 404:
                         logger.info(f"File {filename} not found (will be created)")
                         file_not_found = True
                         break  # Exit retry loop - no need to retry for non-existent files
 
-                    # Check for error responses (dict with status_code)
-                    if isinstance(resp, dict):
-                        status = resp.get("status_code", 0)
-                        if status == 404:
-                            logger.info(f"File {filename} not found (will be created)")
-                            file_not_found = True
-                            break
-                        if status != 200:
-                            last_error = f"HTTP {status}"
-                            logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
-                            continue
-
-                    # For streaming response, check status_code attribute
-                    if hasattr(resp, 'status_code') and resp.status_code != 200:
-                        last_error = f"HTTP {resp.status_code}"
+                    # Handle non-200 responses (retry)
+                    if status_code != 0 and status_code != 200:
+                        last_error = f"HTTP {status_code}"
                         logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
                         continue
 
