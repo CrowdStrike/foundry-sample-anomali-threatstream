@@ -189,7 +189,7 @@ func isTestMode() bool {
 // estimateFinalFileSizes checks if any file will exceed the 200 MB limit based on first batch.
 // This fail-fast check prevents wasting hours on pagination only to fail at the end.
 // Only runs on first execution (no existing files).
-func estimateFinalFileSizes(csvFiles []string, iocsInBatch int, totalCount int, existingFilePaths map[string]string, logger *slog.Logger) error {
+func estimateFinalFileSizes(csvFiles []string, iocsInBatch int, totalCount int64, existingFilePaths map[string]string, logger *slog.Logger) error {
 	// Only run this check on first execution (no existing files)
 	if len(existingFilePaths) > 0 {
 		return nil
@@ -207,10 +207,10 @@ func estimateFinalFileSizes(csvFiles []string, iocsInBatch int, totalCount int, 
 	}
 	var projections []projection
 
-	for _, filepath := range csvFiles {
-		filename := path.Base(filepath)
+	for _, fp := range csvFiles {
+		filename := filepath.Base(fp)
 
-		fileInfo, err := os.Stat(filepath)
+		fileInfo, err := os.Stat(fp)
 		if err != nil {
 			continue
 		}
@@ -218,7 +218,7 @@ func estimateFinalFileSizes(csvFiles []string, iocsInBatch int, totalCount int, 
 		fileSizeMB := float64(fileSize) / (1024 * 1024)
 
 		// Count records in this file (subtract 1 for header)
-		file, err := os.Open(filepath)
+		file, err := os.Open(fp)
 		if err != nil {
 			continue
 		}
