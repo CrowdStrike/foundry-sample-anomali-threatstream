@@ -22,7 +22,6 @@ actions:
             limit: 1000
             repository: search-all
             status: active
-            type: hash
         version_constraint: ~0
     CreateVariable:
         next:
@@ -70,7 +69,6 @@ loops:
                     next: ${data['WorkflowCustomVariable.next']}
                     repository: search-all
                     status: active
-                    type: hash
                 version_constraint: ~0
             UpdateVariable2:
                 id: 6c6eab39063fa3b72d98c82af60deb8a
