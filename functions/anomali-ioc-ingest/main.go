@@ -319,6 +319,7 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"confidence_gte", req.ConfidenceGte,
 		"confidence_gt", req.ConfidenceGt,
 		"update_id_gt", req.UpdateIDGt,
+		"fail_fast_enabled", req.FailFastEnabled,
 	)
 
 	// Create temp directory early for file downloads and processing
@@ -479,9 +480,13 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 
 	// Fail-fast check: estimate final file sizes on first execution
 	// This prevents wasting hours on pagination only to fail at the end
-	// Disabled by default - set fail_fast_enabled=true to enable
 	if req.FailFastEnabled {
 		totalCount := getMetaTotalCount(meta)
+		logger.Info("Fail-fast check enabled",
+			"total_count", totalCount,
+			"iocs_in_batch", len(iocs),
+			"existing_files_count", len(existingFilePaths),
+			"csv_files_count", len(csvFiles))
 		if err := estimateFinalFileSizes(csvFiles, len(iocs), totalCount, existingFilePaths, logger); err != nil {
 			logger.Error("File size projection exceeds limit", "error", err)
 			if job != nil {
