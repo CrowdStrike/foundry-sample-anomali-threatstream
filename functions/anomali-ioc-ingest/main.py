@@ -541,14 +541,14 @@ def download_existing_lookup_files_from_ngsiem(
 
     Resilience features:
     - Streaming download with Content-Length verification
-    - Retry with exponential backoff (3 attempts) for transient errors
+    - Retry with exponential backoff (5 attempts: 5s, 10s, 20s, 40s, 60s max)
     - Size verification to detect incomplete downloads
     - Aborts if any existing file fails to download (prevents data loss)
     """
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals,too-many-nested-blocks
     existing_files = {}
     failed_downloads = []  # Track files that existed but failed to download
-    max_retries = 3
+    max_retries = 5  # Match Go implementation for consistency
 
     try:
         logger.info(f"Checking for existing lookup files in repository: {repository}")
@@ -589,7 +589,8 @@ def download_existing_lookup_files_from_ngsiem(
                    (f" for type '{ioc_type}'" if ioc_type else ""))
 
         # Use FalconPy NGSIEM client with streaming support
-        ngsiem = NGSIEM()
+        # 10-minute timeout for large files (200MB at ~350KB/s = ~9.5 minutes)
+        ngsiem = NGSIEM(timeout=600)
 
         for filename in filenames_to_try:
             # Retry logic for download
@@ -599,8 +600,8 @@ def download_existing_lookup_files_from_ngsiem(
 
             for attempt in range(1, max_retries + 1):
                 if attempt > 1:
-                    # Exponential backoff: 2s, 4s, 8s
-                    backoff = 2 ** attempt
+                    # Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped at 60s)
+                    backoff = min(5 * (2 ** (attempt - 2)), 60)
                     logger.info(f"Retrying download of {filename} after {backoff}s "
                                f"(attempt {attempt}/{max_retries})")
                     time.sleep(backoff)
@@ -646,8 +647,9 @@ def download_existing_lookup_files_from_ngsiem(
 
                     dest_path = os.path.join(temp_dir, f"existing_{filename}")
                     bytes_written = 0
+                    last_progress_log = 0  # Track when we last logged progress
 
-                    # Stream to disk
+                    # Stream to disk with progress logging for large files
                     with open(dest_path, 'wb') as f:
                         if hasattr(resp, 'iter_content'):
                             # Streaming response
@@ -655,6 +657,12 @@ def download_existing_lookup_files_from_ngsiem(
                                 if chunk:
                                     f.write(chunk)
                                     bytes_written += len(chunk)
+                                    # Log progress every 10MB for large files
+                                    if bytes_written - last_progress_log >= 10 * 1024 * 1024:
+                                        logger.info(f"Download progress: {filename} - "
+                                                   f"{bytes_written / (1024*1024):.1f}MB / "
+                                                   f"{expected_size / (1024*1024):.1f}MB")
+                                        last_progress_log = bytes_written
                         elif isinstance(resp, bytes):
                             # Non-streaming fallback (shouldn't happen with stream=True)
                             f.write(resp)
@@ -1393,6 +1401,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
     """
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals
 
+    start_time = time.time()
+
     try:
         # Parse request parameters
         repository = request.body.get("repository", "search-all").strip()
@@ -1423,7 +1433,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         logger.info(f"Starting IOC ingestion for repository: {repository}")
         logger.info(
             f"Request parameters: status={status_filter}, type={type_filter}, "
-            f"trustedcircles={trustedcircles}, feed_id={feed_id}, next={next_token}, limit={limit}"
+            f"trustedcircles={trustedcircles}, feed_id={feed_id}, next={next_token}, limit={limit}, "
+            f"confidence_gte={confidence_gte}, confidence_gt={confidence_gt}"
         )
 
         # Initialize clients
@@ -1440,11 +1451,18 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         # Create temp_dir early for disk-based streaming (O(1) memory)
         # This is used for downloading existing files and creating new CSV files
         with tempfile.TemporaryDirectory() as temp_dir:
+            # Phase 1: Download existing lookup files
+            phase1_start = time.time()
+            logger.info("Phase 1: Downloading existing lookup files...")
+
             # Check for existing files and handle missing file recovery
             # Files are streamed directly to temp_dir (not held in memory)
             should_start_fresh, existing_files = check_and_recover_missing_files(
                 repository, type_filter, temp_dir, api_client, headers, logger
             )
+
+            phase1_elapsed = time.time() - phase1_start
+            logger.info(f"Phase 1 complete: Downloaded {len(existing_files)} existing files in {format_elapsed_time(phase1_elapsed)}")
 
             if should_start_fresh:
                 logger.info("Starting completely fresh sync - clearing all collection data")
@@ -1477,11 +1495,13 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
                 logger.info(f"Final query_params before API call: {query_params}")
 
-                # Fetch single batch of IOCs (workflow handles pagination)
-                logger.info("Fetching one batch of IOCs")
+                # Phase 2: Fetch IOCs from Anomali
+                phase2_start = time.time()
+                logger.info("Phase 2: Fetching IOCs from Anomali...")
                 iocs, meta = fetch_iocs_from_anomali(api_integrations, query_params, logger)
 
-                logger.info(f"Fetched {len(iocs)} IOCs from Anomali")
+                phase2_elapsed = time.time() - phase2_start
+                logger.info(f"Phase 2 complete: Fetched {len(iocs)} IOCs in {format_elapsed_time(phase2_elapsed)}")
 
                 if not iocs:
                     # Mark job as completed even with no data (if job exists)
@@ -1502,8 +1522,13 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                         code=200
                     )
 
-                # Process IOCs and create CSV files (streams from existing files on disk)
+                # Phase 3: Process IOCs and create CSV files
+                phase3_start = time.time()
+                logger.info("Phase 3: Processing IOCs and creating CSV files...")
                 csv_files, process_stats = process_iocs_to_csv(iocs, temp_dir, existing_files, logger)
+
+                phase3_elapsed = time.time() - phase3_start
+                logger.info(f"Phase 3 complete: Created {len(csv_files)} CSV files in {format_elapsed_time(phase3_elapsed)}")
 
                 if not csv_files:
                     # Mark job as completed but no valid data (if job exists)
@@ -1524,8 +1549,13 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                         code=200
                     )
 
-                # Upload CSV files to Falcon Next-Gen SIEM
+                # Phase 4: Upload CSV files to Falcon Next-Gen SIEM
+                phase4_start = time.time()
+                logger.info("Phase 4: Uploading CSV files to NGSIEM...")
                 upload_results = upload_csv_files_to_ngsiem(csv_files, repository, logger)
+
+                phase4_elapsed = time.time() - phase4_start
+                logger.info(f"Phase 4 complete: Uploaded {len(csv_files)} files in {format_elapsed_time(phase4_elapsed)}")
 
                 # Update collections with latest state
                 if meta and iocs:
@@ -1566,6 +1596,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     logger.info(f"Response next field set to: {next_token_value}")
                 else:
                     logger.info("No next token - pagination complete")
+
+                # Log total elapsed time
+                total_elapsed = time.time() - start_time
+                logger.info(f"Total ingestion completed in {format_elapsed_time(total_elapsed)}")
 
                 return Response(
                     body=response_body,
