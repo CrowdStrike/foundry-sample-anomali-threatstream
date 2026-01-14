@@ -38,12 +38,13 @@ Sync Logic:
 - Job tracking is optimized to reduce overhead while maintaining audit trail
 - Workflow manages pagination with next tokens, function processes single pages
 """
-# pylint: disable=too-many-lines
+# pylint: disable=too-many-lines,broad-exception-caught
 
 import csv
 import json
 import os
 import random
+import shutil
 import tempfile
 import time
 import uuid
@@ -430,7 +431,7 @@ def fetch_iocs_from_anomali(
     max_retries: int = 5
 ) -> tuple[List[Dict], Dict]:
     """Fetch IOCs from Anomali ThreatStream using API Integration with retry logic for rate limiting"""
-    # pylint: disable=too-many-branches,too-many-statements,too-many-locals
+    # pylint: disable=too-many-branches,too-many-statements,too-many-locals,too-many-nested-blocks
 
     for attempt in range(max_retries + 1):
         try:
@@ -591,7 +592,6 @@ def download_existing_lookup_files_locally(
                    (f" for type '{ioc_type}'" if ioc_type else ""))
 
         # Copy each existing file to temp_dir for streaming processing
-        import shutil
         for filename in filenames_to_try:
             source_path = os.path.join(test_dir, filename)
             try:
@@ -712,7 +712,7 @@ def download_existing_lookup_files_from_ngsiem(
                         break  # Exit retry loop - no need to retry for non-existent files
 
                     # Handle non-200 responses (retry)
-                    if status_code != 0 and status_code != 200:
+                    if status_code not in (0, 200):
                         last_error = f"HTTP {status_code}"
                         logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
                         continue
@@ -1089,7 +1089,6 @@ def upload_csv_files_locally(csv_files: List[str], repository: str, logger: Logg
             target_path = os.path.join(test_dir, filename)
 
             # Copy file to test directory
-            import shutil
             shutil.copy2(csv_file, target_path)
 
             # Get file size for logging
@@ -1208,7 +1207,7 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
         confidence_lt: Filter by confidence score less than
         confidence_lte: Filter by confidence score less than or equal to
     """
-    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument,too-many-locals
+    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument,too-many-locals,too-many-statements
     if next_token:
         # Pagination call: only use update_id__gt, no time constraints
         logger.info(f"PAGINATION BRANCH: Using next_token: {next_token}")
@@ -1544,7 +1543,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             )
 
             phase1_elapsed = time.time() - phase1_start
-            logger.info(f"Phase 1 complete: Downloaded {len(existing_files)} existing files in {format_elapsed_time(phase1_elapsed)}")
+            logger.info(
+                f"Phase 1 complete: Downloaded {len(existing_files)} existing files "
+                f"in {format_elapsed_time(phase1_elapsed)}"
+            )
 
             if should_start_fresh:
                 logger.info("Starting completely fresh sync - clearing all collection data")

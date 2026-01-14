@@ -1,6 +1,9 @@
 """Test module for the Anomali ThreatStream IOC ingestion function."""
+# pylint: disable=too-many-lines,too-many-public-methods,import-outside-toplevel
+# pylint: disable=redefined-outer-name,reimported,unused-variable,unspecified-encoding
 
 import csv
+import re
 import unittest
 import importlib
 from unittest.mock import patch, MagicMock, call
@@ -187,10 +190,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
     def test_no_hardcoded_definition_ids(self):
         """Test that no hardcoded definition IDs are used in the source code."""
-        import re
-
         # Read the main.py file content
-        with open('main.py', 'r') as f:
+        with open('main.py', 'r', encoding='utf-8') as f:
             content = f.read()
 
         # Pattern to match potential hardcoded UUIDs/IDs (32 hex chars)
@@ -1515,7 +1516,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertEqual(result["order_by"], "update_id")
 
         # Verify the new log message format
-        mock_logger.info.assert_any_call("INITIAL: Using job's stored parameters: {'update_id__gt': 'job_stored_12345', 'status': 'active', 'limit': 1000, 'order_by': 'update_id'}")
+        expected_params = {
+            'update_id__gt': 'job_stored_12345', 'status': 'active',
+            'limit': 1000, 'order_by': 'update_id'
+        }
+        mock_logger.info.assert_any_call(
+            f"INITIAL: Using job's stored parameters: {expected_params}"
+        )
 
     def test_build_query_params_job_fallback_to_direct_lookup(self):
         """Test build_query_params with job parameters (preferred approach)."""
@@ -1802,9 +1809,17 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             os.makedirs(test_output_dir, exist_ok=True)
 
             # Create some test lookup files
+            ip_csv = (
+                "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+                "1.2.3.4,90,malware,test,tag1,2024-12-31T23:59:59Z\n"
+            )
+            domain_csv = (
+                "dns.domain.name,confidence,threat_type,source,tags,expiration_ts\n"
+                "evil.com,85,phishing,test,tag2,2024-12-31T23:59:59Z\n"
+            )
             test_files = {
-                "anomali_threatstream_ip.csv": "destination.ip,confidence,threat_type,source,tags,expiration_ts\n1.2.3.4,90,malware,test,tag1,2024-12-31T23:59:59Z\n",
-                "anomali_threatstream_domain.csv": "dns.domain.name,confidence,threat_type,source,tags,expiration_ts\nevil.com,85,phishing,test,tag2,2024-12-31T23:59:59Z\n"
+                "anomali_threatstream_ip.csv": ip_csv,
+                "anomali_threatstream_domain.csv": domain_csv
             }
 
             for filename, content in test_files.items():
@@ -1835,19 +1850,25 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                     self.assertNotIn("anomali_threatstream_domain.csv", result_ip)
 
                     # Test with hash type (should look for hash_md5, hash_sha1, hash_sha256)
-                    result_hash = main.download_existing_lookup_files_locally("search-all", "hash", download_dir, mock_logger)
+                    result_hash = main.download_existing_lookup_files_locally(
+                        "search-all", "hash", download_dir, mock_logger
+                    )
 
                     # Should find no hash files (we didn't create any)
                     self.assertEqual(len(result_hash), 0)
 
                     # Test with md5 type mapping
-                    result_md5 = main.download_existing_lookup_files_locally("search-all", "md5", download_dir, mock_logger)
+                    result_md5 = main.download_existing_lookup_files_locally(
+                        "search-all", "md5", download_dir, mock_logger
+                    )
 
                     # Should find no md5 files (we didn't create any)
                     self.assertEqual(len(result_md5), 0)
 
                     # Test with non-existent type
-                    result_unknown = main.download_existing_lookup_files_locally("search-all", "unknown", download_dir, mock_logger)
+                    result_unknown = main.download_existing_lookup_files_locally(
+                        "search-all", "unknown", download_dir, mock_logger
+                    )
 
                     # Should find no files
                     self.assertEqual(len(result_unknown), 0)
@@ -1860,7 +1881,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create a test CSV file
             test_csv_path = os.path.join(temp_dir, "test_file.csv")
-            test_csv_content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n1.2.3.4,90,malware,test,tag1,2024-12-31T23:59:59Z\n"
+            test_csv_content = (
+                "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+                "1.2.3.4,90,malware,test,tag1,2024-12-31T23:59:59Z\n"
+            )
 
             with open(test_csv_path, 'w', encoding='utf-8') as f:
                 f.write(test_csv_content)
@@ -1966,9 +1990,9 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
             test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
 
             # Write a small CSV with header + 10 rows (~500 bytes)
+            rows = [f"192.168.1.{i},85,malware,test,tag1,2026-12-31" for i in range(10)]
             content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
-            for i in range(10):
-                content += f"192.168.1.{i},85,malware,test,tag1,2026-12-31\n"
+            content += "\n".join(rows) + "\n"
 
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write(content)
@@ -1986,9 +2010,9 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
             test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
 
             # Write a CSV with header + 100 rows (~5KB)
+            rows = [f"192.168.1.{i},85,malware,test,tag1,2026-12-31" for i in range(100)]
             content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
-            for i in range(100):
-                content += f"192.168.1.{i},85,malware,test,tag1,2026-12-31\n"
+            content += "\n".join(rows) + "\n"
 
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write(content)
