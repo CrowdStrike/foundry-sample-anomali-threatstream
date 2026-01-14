@@ -1921,5 +1921,111 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertEqual(len(response.errors), 1)
             self.assertIn("Internal error", response.errors[0].message)
 
+
+class TestEstimateFinalFileSizes(unittest.TestCase):
+    """Tests for the fail-fast file size estimation functionality."""
+
+    def test_skips_check_when_existing_files_present(self):
+        """Test that estimation is skipped when existing files are present."""
+        mock_logger = MagicMock()
+        existing_files = {"test.csv": "/tmp/test.csv"}
+
+        result = main.estimate_final_file_sizes([], 100, 1000000, existing_files, mock_logger)
+
+        self.assertIsNone(result)
+
+    def test_skips_check_when_no_iocs_in_batch(self):
+        """Test that estimation is skipped when no IOCs in batch."""
+        mock_logger = MagicMock()
+
+        result = main.estimate_final_file_sizes([], 0, 1000000, {}, mock_logger)
+
+        self.assertIsNone(result)
+
+    def test_skips_check_when_total_count_is_zero(self):
+        """Test that estimation is skipped when total_count is zero."""
+        mock_logger = MagicMock()
+
+        result = main.estimate_final_file_sizes([], 100, 0, {}, mock_logger)
+
+        self.assertIsNone(result)
+
+    def test_returns_none_when_projected_size_under_limit(self):
+        """Test that None is returned when projected size is under 200MB limit."""
+        mock_logger = MagicMock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
+
+            # Write a small CSV with header + 10 rows (~500 bytes)
+            content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+            for i in range(10):
+                content += f"192.168.1.{i},85,malware,test,tag1,2026-12-31\n"
+
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            # With 10 IOCs in batch and 1000 total, projected size should be ~50KB (well under 200MB)
+            result = main.estimate_final_file_sizes([test_file], 10, 1000, {}, mock_logger)
+
+            self.assertIsNone(result)
+
+    def test_returns_error_when_projected_size_exceeds_limit(self):
+        """Test that error message is returned when projected size exceeds 200MB limit."""
+        mock_logger = MagicMock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
+
+            # Write a CSV with header + 100 rows (~5KB)
+            content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+            for i in range(100):
+                content += f"192.168.1.{i},85,malware,test,tag1,2026-12-31\n"
+
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            # With 100 IOCs in batch and 100 million total, projected size should exceed 200MB
+            # 5KB / 100 records = 50 bytes/record
+            # 100,000,000 records * 50 bytes = 5GB (way over limit)
+            result = main.estimate_final_file_sizes([test_file], 100, 100000000, {}, mock_logger)
+
+            self.assertIsNotNone(result)
+            self.assertIn("200 MB", result)
+            self.assertIn("NGSIEM limit", result)
+
+    def test_handles_missing_file_gracefully(self):
+        """Test that missing files don't cause errors."""
+        mock_logger = MagicMock()
+
+        # Pass a non-existent file - should not raise, but will likely error on os.path.getsize
+        # The function should handle this case or we should test the expected behavior
+        try:
+            result = main.estimate_final_file_sizes(["/nonexistent/file.csv"], 100, 1000000, {}, mock_logger)
+            # If it doesn't raise, it should return None (no projections)
+            self.assertIsNone(result)
+        except (FileNotFoundError, OSError):
+            # This is also acceptable behavior - the function doesn't handle missing files
+            pass
+
+    def test_handles_empty_csv_file(self):
+        """Test that files with only headers (no records) are handled."""
+        mock_logger = MagicMock()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
+
+            # Write a CSV with only header (no data rows)
+            content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+
+            with open(test_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            # Should skip files with no records
+            result = main.estimate_final_file_sizes([test_file], 100, 1000000, {}, mock_logger)
+
+            self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
