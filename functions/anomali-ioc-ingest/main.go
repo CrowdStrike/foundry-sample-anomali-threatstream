@@ -271,7 +271,7 @@ func estimateFinalFileSizes(csvFiles []string, iocsInBatch int, totalCount int64
 			fileDetails = append(fileDetails, fmt.Sprintf("%s (~%.0f MB with %d records)", p.filename, p.projectedSizeMB, p.projectedRecords))
 		}
 		return fmt.Errorf(
-			"projected file size will exceed 200 MB NGSIEM limit. "+
+			"The estimated file size will exceed the 200 MB NGSIEM API upload limit. "+
 				"Based on first batch distribution: %s. "+
 				"Total IOCs matching query: %d. "+
 				"To reduce dataset size, use filters: "+
@@ -481,18 +481,7 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	// Fail-fast check: estimate final file sizes on first execution
 	// This prevents wasting hours on pagination only to fail at the end
 	if req.FailFastEnabled {
-		// Debug: Log the type of total_count to diagnose extraction issues
-		if tc, ok := meta["total_count"]; ok {
-			logger.Info("total_count type debug", "type", fmt.Sprintf("%T", tc), "value", tc)
-		} else {
-			logger.Warn("total_count not found in meta", "meta_keys", fmt.Sprintf("%v", meta))
-		}
 		totalCount := getMetaTotalCount(meta)
-		logger.Info("Fail-fast check enabled",
-			"total_count", totalCount,
-			"iocs_in_batch", len(iocs),
-			"existing_files_count", len(existingFilePaths),
-			"csv_files_count", len(csvFiles))
 		if err := estimateFinalFileSizes(csvFiles, len(iocs), totalCount, existingFilePaths, logger); err != nil {
 			logger.Error("File size projection exceeds limit", "error", err)
 			if job != nil {
@@ -1460,21 +1449,6 @@ func fetchIOCsFromAnomali(ctx context.Context, falconClient *client.CrowdStrikeA
 					meta = metaMap
 				}
 			}
-		}
-
-		// Debug: Log the response structure to diagnose total_count extraction
-		if m, ok := response.Payload.(map[string]interface{}); ok {
-			// Check if total_count is at top level
-			if tc, ok := m["total_count"]; ok {
-				logger.Info("Found total_count at top level", "total_count", tc)
-				meta["total_count"] = tc
-			}
-			// Log all top-level keys in the response
-			topLevelKeys := make([]string, 0, len(m))
-			for k := range m {
-				topLevelKeys = append(topLevelKeys, k)
-			}
-			logger.Info("Response structure", "top_level_keys", topLevelKeys, "meta_contents", meta)
 		}
 
 		logger.Info("Fetched IOCs from Anomali", "count", len(iocs))

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -807,9 +808,14 @@ func TestGetMetaTotalCount(t *testing.T) {
 			expected: 300,
 		},
 		{
-			name:     "string total_count (unsupported)",
+			name:     "string total_count",
 			meta:     map[string]interface{}{"total_count": "400"},
-			expected: 0,
+			expected: 400,
+		},
+		{
+			name:     "json.Number total_count",
+			meta:     map[string]interface{}{"total_count": json.Number("561780728")},
+			expected: 561780728,
 		},
 	}
 
