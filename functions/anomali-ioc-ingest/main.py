@@ -891,36 +891,7 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
             # Log the raw response for troubleshooting
             logger.info(f"NGSIEM upload response for {filename}: {response}")
 
-            # Handle 500 errors that may be successful uploads with empty responses
-            if response["status_code"] == 500:
-                error_body = response.get("body", {})
-                errors = error_body.get("errors", [])
-
-                # Check for JSON parsing errors that indicate successful upload
-                is_likely_success = False
-                if errors:
-                    error_message = str(errors[0].get("message", "")).lower()
-                    is_likely_success = any(phrase in error_message for phrase in [
-                        "extra data: line 1 column",
-                        "expecting value: line 1 column 1 (char 0)"
-                    ])
-
-                if is_likely_success:
-                    logger.info(f"Upload successful for {filename} (recovered from parsing error)")
-                    results.append({
-                        "file": filename,
-                        "status": "success",
-                        "message": "File uploaded successfully"
-                    })
-                else:
-                    # Real 500 error
-                    results.append({
-                        "file": filename,
-                        "status": "error",
-                        "message": f"Upload failed: {errors}"
-                    })
-            elif response["status_code"] >= 400:
-                # Other 4xx errors are real failures
+            if response["status_code"] >= 400:
                 error_messages = response.get("body", {}).get("errors", [])
                 results.append({
                     "file": filename,
@@ -928,7 +899,6 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
                     "message": f"Upload failed: {error_messages}"
                 })
             else:
-                # 2xx success
                 results.append({
                     "file": filename,
                     "status": "success",
