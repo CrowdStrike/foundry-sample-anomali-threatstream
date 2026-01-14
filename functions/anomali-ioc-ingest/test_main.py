@@ -2000,7 +2000,7 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
 
             self.assertIsNotNone(result)
             self.assertIn("200 MB", result)
-            self.assertIn("NGSIEM limit", result)
+            self.assertIn("NGSIEM API upload limit", result)
 
     def test_handles_missing_file_gracefully(self):
         """Test that missing files don't cause errors."""
