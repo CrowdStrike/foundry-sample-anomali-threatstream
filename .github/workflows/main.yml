@@ -44,7 +44,13 @@ jobs:
         uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c  # v6.1.0
         with:
           go-version: '1.25'
-          cache-dependency-path: functions/anomali-ioc-ingest/go.sum
+
+      - name: Install Go dependencies
+        run: |
+          if [ -f "go.mod" ]; then
+            go get .
+          fi
+        working-directory: functions/anomali-ioc-ingest
 
       - name: Run Go tests
         run: |
