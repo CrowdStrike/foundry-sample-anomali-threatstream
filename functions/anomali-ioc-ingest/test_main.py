@@ -23,13 +23,21 @@ def mock_handler(*_args, **_kwargs):
 class AnomaliFunctionTestCase(unittest.TestCase):
     """Test case class for Anomali function handler tests."""
 
-    def setUp(self):
-        """Set up test fixtures before each test method."""
-        patcher = patch("crowdstrike.foundry.function.Function.handler", new=mock_handler)
-        self.addCleanup(patcher.stop)
-        self.handler_patch = patcher.start()
-
+    @classmethod
+    def setUpClass(cls):
+        """Set up test fixtures once for all test methods."""
+        cls.handler_patcher = patch("crowdstrike.foundry.function.Function.handler", new=mock_handler)
+        cls.handler_patcher.start()
+        # Mock time.sleep globally to prevent slow tests from retry/backoff logic
+        cls.sleep_patcher = patch("main.time.sleep")
+        cls.sleep_patcher.start()
         importlib.reload(main)
+
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up after all tests."""
+        cls.handler_patcher.stop()
+        cls.sleep_patcher.stop()
 
     def test_get_last_update_id_not_found(self):
         """Test get_last_update_id when no previous update exists."""
