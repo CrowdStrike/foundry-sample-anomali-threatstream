@@ -99,20 +99,21 @@ var iocTypeMappings = map[string]IOCTypeMapping{
 
 // IngestRequest represents the request payload for IOC ingestion
 type IngestRequest struct {
-	Repository     string `json:"repository"`
-	Status         string `json:"status"`
-	Type           string `json:"type"`
-	TrustedCircles string `json:"trustedcircles"`
-	FeedID         string `json:"feed_id"`
-	ModifiedTsGt   string `json:"modified_ts_gt"`
-	ModifiedTsLt   string `json:"modified_ts_lt"`
-	UpdateIDGt     string `json:"update_id_gt"`
-	ConfidenceGt   *int   `json:"confidence_gt"`
-	ConfidenceGte  *int   `json:"confidence_gte"`
-	ConfidenceLt   *int   `json:"confidence_lt"`
-	ConfidenceLte  *int   `json:"confidence_lte"`
-	Limit          int    `json:"limit"`
-	Next           string `json:"next"`
+	Repository      string `json:"repository"`
+	Status          string `json:"status"`
+	Type            string `json:"type"`
+	TrustedCircles  string `json:"trustedcircles"`
+	FeedID          string `json:"feed_id"`
+	ModifiedTsGt    string `json:"modified_ts_gt"`
+	ModifiedTsLt    string `json:"modified_ts_lt"`
+	UpdateIDGt      string `json:"update_id_gt"`
+	ConfidenceGt    *int   `json:"confidence_gt"`
+	ConfidenceGte   *int   `json:"confidence_gte"`
+	ConfidenceLt    *int   `json:"confidence_lt"`
+	ConfidenceLte   *int   `json:"confidence_lte"`
+	Limit           int    `json:"limit"`
+	Next            string `json:"next"`
+	FailFastEnabled bool   `json:"fail_fast_enabled"`
 }
 
 // IngestResponse represents the response payload
@@ -478,18 +479,21 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 
 	// Fail-fast check: estimate final file sizes on first execution
 	// This prevents wasting hours on pagination only to fail at the end
-	totalCount := getMetaTotalCount(meta)
-	if err := estimateFinalFileSizes(csvFiles, len(iocs), totalCount, existingFilePaths, logger); err != nil {
-		logger.Error("File size projection exceeds limit", "error", err)
-		if job != nil {
-			job.State = JobFailed
-			job.Error = err.Error()
-			_ = updateJob(ctx, falconClient, job, logger)
+	// Disabled by default - set fail_fast_enabled=true to enable
+	if req.FailFastEnabled {
+		totalCount := getMetaTotalCount(meta)
+		if err := estimateFinalFileSizes(csvFiles, len(iocs), totalCount, existingFilePaths, logger); err != nil {
+			logger.Error("File size projection exceeds limit", "error", err)
+			if job != nil {
+				job.State = JobFailed
+				job.Error = err.Error()
+				_ = updateJob(ctx, falconClient, job, logger)
+			}
+			return fdk.ErrResp(fdk.APIError{
+				Code:    500,
+				Message: err.Error(),
+			})
 		}
-		return fdk.ErrResp(fdk.APIError{
-			Code:    500,
-			Message: err.Error(),
-		})
 	}
 
 	// Upload CSV files to NGSIEM
