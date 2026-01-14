@@ -481,6 +481,12 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	// Fail-fast check: estimate final file sizes on first execution
 	// This prevents wasting hours on pagination only to fail at the end
 	if req.FailFastEnabled {
+		// Debug: Log the type of total_count to diagnose extraction issues
+		if tc, ok := meta["total_count"]; ok {
+			logger.Info("total_count type debug", "type", fmt.Sprintf("%T", tc), "value", tc)
+		} else {
+			logger.Warn("total_count not found in meta", "meta_keys", fmt.Sprintf("%v", meta))
+		}
 		totalCount := getMetaTotalCount(meta)
 		logger.Info("Fail-fast check enabled",
 			"total_count", totalCount,
@@ -622,6 +628,14 @@ func getMetaTotalCount(meta map[string]interface{}) int64 {
 			return v
 		case int:
 			return int64(v)
+		case json.Number:
+			if n, err := v.Int64(); err == nil {
+				return n
+			}
+		case string:
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+				return n
+			}
 		}
 	}
 	return 0
