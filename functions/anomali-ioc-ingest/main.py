@@ -548,7 +548,7 @@ def download_existing_lookup_files_from_ngsiem(
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals,too-many-nested-blocks
     existing_files = {}
     failed_downloads = []  # Track files that existed but failed to download
-    max_retries = 5  # Match Go implementation for consistency
+    max_retries = 5
 
     try:
         logger.info(f"Checking for existing lookup files in repository: {repository}")
