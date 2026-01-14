@@ -1322,9 +1322,13 @@ func fetchIOCsFromAnomali(ctx context.Context, falconClient *client.CrowdStrikeA
 					// Extract IOCs from the 207 response
 					iocs, meta, parseErr := parse207Response(apiErr, logger)
 					if parseErr != nil {
-						logger.Warn("Failed to parse 207 response", "error", parseErr)
-						// Fall through to retry logic
-					} else {
+						// 207 parsing failed - this is not retryable, just return empty result
+						// The API returned a valid 207 but with unexpected format
+						logger.Warn("Failed to parse 207 response, returning empty result", "error", parseErr)
+						return []IOC{}, map[string]interface{}{}, nil
+					}
+					// Successfully parsed 207 - check for embedded errors
+					{
 						// Check for embedded 429 rate limit errors
 						if meta != nil {
 							if errors, ok := meta["errors"].([]interface{}); ok {
