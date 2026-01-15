@@ -1205,7 +1205,7 @@ func TestProcessIOCsToCSV_EmptyPrimaryValue(t *testing.T) {
 	tempDir := t.TempDir()
 
 	iocs := []IOC{
-		{IType: "ip", IP: "", Confidence: 90},       // Empty IP
+		{IType: "ip", IP: "", Confidence: 90},        // Empty IP
 		{IType: "domain", Value: "", Confidence: 90}, // Empty domain
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90}, // Valid IP
 	}
@@ -1336,7 +1336,7 @@ func TestIngestJobStructure(t *testing.T) {
 		State:            JobRunning,
 		IOCType:          "ip",
 		Parameters: map[string]interface{}{
-			"status":       "active",
+			"status":        "active",
 			"update_id__gt": "0",
 		},
 	}
