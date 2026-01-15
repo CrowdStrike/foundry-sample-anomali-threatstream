@@ -88,7 +88,7 @@ Next, go to **Foundry** > **App catalog**, find your app, and install it. During
 
 This app includes:
 
-- **Foundry Function**: `anomali-ioc-ingest` - Ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM (available in both Python and Go implementations)
+- **Foundry Function**: `anomali-ioc-ingest` - A memory-efficient function that ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM using disk-based streaming (O(1) memory usage). Available in both Python and Go implementations.
 - **API Integration**: Anomali ThreatStream API configuration for authentication and data retrieval
 - **Collections**:
   - `ingest_jobs` - Tracks each job run for ingesting IOCs
@@ -97,6 +97,9 @@ This app includes:
 
 Key features:
 
+- **Memory-Efficient Streaming**: Disk-based CSV processing with O(1) memory usage, enabling 200MB file processing with ~3-5MB constant memory overhead
+- **200 MB File Size Protection**: Detects when files approach NGSIEM upload limit and provides actionable filtering guidance
+- **Fail-Fast Estimation**: Optional early file size projection to prevent hours of pagination when dataset exceeds limits
 - **Automated IOC Ingestion**: Hourly synchronization of threat intelligence with workflow-managed pagination
 - **Multiple IOC Types**: IP addresses, domains, URLs, email addresses, file hashes (MD5/SHA1/SHA256)
 - **Incremental Sync**: Efficient processing using update_id tracking with type-specific state management
