@@ -16,7 +16,8 @@ Automates threat intelligence ingestion from Anomali ThreatStream, synchronizing
 ## Prerequisites
 
 * The Foundry CLI (instructions below).
-* Python 3.13+ (needed if modifying the app's function). See [Python For Beginners](https://www.python.org/about/gettingstarted/) for installation instructions.
+* **For Python development**: Python 3.13+. See [Python For Beginners](https://www.python.org/about/gettingstarted/) for installation instructions.
+* **For Go development**: Go 1.25+. See [Go Downloads](https://go.dev/dl/) for installation instructions.
 
 ### Install the Foundry CLI
 
@@ -87,7 +88,7 @@ Next, go to **Foundry** > **App catalog**, find your app, and install it. During
 
 This app includes:
 
-- **Foundry Function**: `anomali-ioc-ingest` - A memory-efficient Python function that ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM using disk-based streaming (O(1) memory usage)
+- **Foundry Function**: `anomali-ioc-ingest` - A memory-efficient function that ingests IOC data from Anomali ThreatStream and creates CSV lookup files for Falcon Next-Gen SIEM using disk-based streaming (O(1) memory usage). Available in both Python and Go implementations.
 - **API Integration**: Anomali ThreatStream API configuration for authentication and data retrieval
 - **Collections**:
   - `ingest_jobs` - Tracks each job run for ingesting IOCs
@@ -109,7 +110,22 @@ Key features:
 
 ## Development
 
-### Local Development Setup
+This app includes two function implementations: **Python** (original) and **Go** (high-performance alternative). Both implementations provide identical functionality.
+
+### Choosing an Implementation
+
+To switch between implementations, edit `manifest.yml` and change the `language` field under the function definition:
+
+```yaml
+functions:
+    - name: anomali-ioc-ingest
+      # ...
+      language: python  # Use 'python' or 'go'
+```
+
+Then redeploy: `foundry apps deploy`
+
+### Python Development
 
 1. **Create and activate virtual environment**:
    ```bash
@@ -123,39 +139,58 @@ Key features:
    pip install -r requirements.txt --upgrade pip
    ```
 
-### Running Tests
+3. **Run tests** (69 tests):
+   ```bash
+   python -m pytest test_main.py -v
+   ```
 
-**Unit Tests**: The project includes comprehensive unit tests:
+4. **Test with coverage**:
+   ```bash
+   pip install pytest-cov
+   python -m pytest test_main.py --cov=main --cov-report=html
+   # View: open htmlcov/index.html
+   ```
+
+5. **Code quality**:
+   ```bash
+   python -m pylint main.py
+   ```
+
+### Go Development
+
+1. **Navigate to function directory**:
+   ```bash
+   cd functions/anomali-ioc-ingest
+   ```
+
+2. **Download dependencies**:
+   ```bash
+   go mod download
+   ```
+
+3. **Run tests** (76 tests):
+   ```bash
+   go test -v ./...
+   ```
+
+4. **Test with coverage**:
+   ```bash
+   go test -coverprofile=coverage.out ./...
+   go tool cover -html=coverage.out -o coverage.html
+   # View: open coverage.html
+   ```
+
+5. **Code quality**:
+   ```bash
+   go vet ./...
+   go build ./...
+   ```
+
+### Local Testing (Both Implementations)
+
+Set `TEST_MODE=true` to enable local file output instead of API calls:
 ```bash
-python -m pytest test_main.py -v
-```
-
-**Test with Coverage**: Generate coverage reports (requires pytest-cov):
-```bash
-pip install pytest-cov
-python -m pytest test_main.py --cov=main --cov-report=html
-# View coverage report: open htmlcov/index.html
-```
-
-### Code Quality
-
-**Pylint**: Run static code analysis (configuration in `.pylintrc`):
-```bash
-python -m pylint main.py
-```
-
-### Debugging Functions Locally
-
-**Environment Variables**: Set up required environment variables for local testing:
-```bash
-export APP_ID="your-app-id"
-export FALCON_CLIENT_ID="your-client-id"  # Must have CustomStorage read/write scopes
-export FALCON_CLIENT_SECRET="your-client-secret"
-```
-
-**Run the function**:
-```bash
-python main.py
+export TEST_MODE="true"
 ```
 
 ## Additional Documentation

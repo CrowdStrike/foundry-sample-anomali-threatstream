@@ -322,7 +322,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         }
 
         # Mock API responses - fresh start scenario requires clearing collection data
-        clear_calls = [Exception("Not found")] * 6  # Expected calls for clearing collection data
+        # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
+        clear_calls = [Exception("Not found")] * 9  # Expected calls for clearing collection data
         job_calls = [
             Exception("Object not found"),  # get_last_update_id
             {"status_code": 200},          # create_job
@@ -672,12 +673,12 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock API harness commands for type-specific sync:
-        # 1. clear_update_id_for_type calls DeleteObject (for missing ip file)
-        # 2. get_last_update_id calls GetObject - should fail (no previous update)
-        # 3. create_job calls PutObject (success)
-        # 4. update_job calls PutObject (success for completion)
+        # 1. get_last_update_id calls GetObject - should fail (no previous update)
+        # 2. create_job calls PutObject (success)
+        # 3. update_job calls PutObject (success for completion)
+        # Note: clear_update_id_for_type is no longer called when files are missing
+        # (the update_id tracks API progress, not file existence)
         mock_api_harness.command.side_effect = [
-            Exception("Object not found"),  # DeleteObject for clear_update_id_for_type (expected)
             Exception("Object not found"),  # GetObject for last update (not found - expected)
             {"status_code": 200},          # PutObject for create_job
             {"status_code": 200},          # PutObject for update_job (completed)
@@ -1048,7 +1049,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         main.clear_collection_data(mock_api_harness, headers, mock_logger)
 
         # Verify all delete operations were called
-        self.assertEqual(mock_api_harness.command.call_count, 6)
+        # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
+        self.assertEqual(mock_api_harness.command.call_count, 9)
 
     def test_save_update_id_error_handling(self):
         """Test save_update_id error handling."""
@@ -1103,12 +1105,12 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock API harness calls:
-        # 1. clear_update_id_for_type calls DeleteObject (for missing ip file)
-        # 2. get_last_update_id calls GetObject (not found)
-        # 3. create_job calls PutObject (success)
-        # 4. update_job calls PutObject (success for completion)
+        # 1. get_last_update_id calls GetObject (not found)
+        # 2. create_job calls PutObject (success)
+        # 3. update_job calls PutObject (success for completion)
+        # Note: clear_update_id_for_type is no longer called when files are missing
+        # (the update_id tracks API progress, not file existence)
         mock_api_harness.command.side_effect = [
-            Exception("Object not found"),  # DeleteObject for clear_update_id_for_type (expected)
             Exception("Object not found"),  # GetObject for last update (not found)
             {"status_code": 200},          # PutObject for create_job
             {"status_code": 200},          # PutObject for update_job (completed)
@@ -1443,7 +1445,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         main.clear_collection_data(mock_api_client, mock_headers, mock_logger)
 
         # Verify the expected number of calls were made
-        self.assertEqual(mock_api_client.command.call_count, 6)
+        # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
+        self.assertEqual(mock_api_client.command.call_count, 9)
 
     def test_process_iocs_existing_file_parse_error(self):
         """Test process_iocs_to_csv with existing file parsing error."""

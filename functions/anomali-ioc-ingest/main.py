@@ -564,7 +564,9 @@ def download_existing_lookup_files_locally(
             "anomali_threatstream_domain.csv",
             "anomali_threatstream_url.csv",
             "anomali_threatstream_email.csv",
-            "anomali_threatstream_hash_md5.csv"
+            "anomali_threatstream_hash_md5.csv",
+            "anomali_threatstream_hash_sha1.csv",
+            "anomali_threatstream_hash_sha256.csv"
         ]
 
         # Filter by type if specified
@@ -645,7 +647,9 @@ def download_existing_lookup_files_from_ngsiem(
             "anomali_threatstream_domain.csv",
             "anomali_threatstream_url.csv",
             "anomali_threatstream_email.csv",
-            "anomali_threatstream_hash_md5.csv"
+            "anomali_threatstream_hash_md5.csv",
+            "anomali_threatstream_hash_sha1.csv",
+            "anomali_threatstream_hash_sha256.csv"
         ]
 
         # Filter by type if specified
@@ -798,8 +802,8 @@ def clear_collection_data(
 
         # Clear the main update tracker and all type-specific trackers
         update_keys = [KEY_LAST_UPDATE]  # Main tracker
-        # Add type-specific trackers
-        for ioc_type in ["ip", "domain", "url", "email", "hash"]:
+        # Add type-specific trackers (including individual hash types)
+        for ioc_type in ["ip", "domain", "url", "email", "hash", "hash_md5", "hash_sha1", "hash_sha256"]:
             update_keys.append(f"{KEY_LAST_UPDATE}_{ioc_type}")
 
         for key in update_keys:
@@ -1436,8 +1440,12 @@ def check_and_recover_missing_files(
         logger.info(f"Checking for existing files for type: {type_filter}")
         existing_files = download_existing_lookup_files(repository, type_filter, temp_dir, logger)
         if not existing_files:
+            # Note: We intentionally do NOT clear the update_id here.
+            # The update_id tracks API pagination progress, not file existence.
+            # Clearing it would cause us to re-fetch all data from the beginning,
+            # resulting in file size regression (shrinking instead of growing).
+            # If files don't exist, new ones will be created with fresh data.
             logger.info(f"No existing files found for type {type_filter} - will create new file")
-            clear_update_id_for_type(api_client, headers, type_filter, logger)
         else:
             logger.info(f"Found existing files for type {type_filter} - will merge with existing data")
 
