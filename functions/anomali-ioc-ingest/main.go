@@ -1335,34 +1335,31 @@ func fetchIOCsFromAnomali(ctx context.Context, falconClient *client.CrowdStrikeA
 						logger.Warn("Failed to parse 207 response, returning empty result", "error", parseErr)
 						return []IOC{}, map[string]interface{}{}, nil
 					}
-					// Successfully parsed 207 - check for embedded errors
-					{
-						// Check for embedded 429 rate limit errors
-						if meta != nil {
-							if errors, ok := meta["errors"].([]interface{}); ok {
-								for _, errItem := range errors {
-									if errMap, ok := errItem.(map[string]interface{}); ok {
-										if code, ok := errMap["code"].(float64); ok && int(code) == http.StatusTooManyRequests {
-											if attempt < maxRetries {
-												backoffBase := 5 * (1 << uint(attempt))
-												retryAfter := float64(backoffBase) + rand.Float64()*2
-												logger.Warn("Rate limited (207 Multi-Status), retrying", "retry_after", retryAfter)
-												select {
-												case <-ctx.Done():
-													return nil, nil, fmt.Errorf("context cancelled during 207 retry backoff: %w", ctx.Err())
-												case <-time.After(time.Duration(retryAfter * float64(time.Second))):
-												}
-												continue
+					// Successfully parsed 207 - check for embedded 429 rate limit errors
+					if meta != nil {
+						if errors, ok := meta["errors"].([]interface{}); ok {
+							for _, errItem := range errors {
+								if errMap, ok := errItem.(map[string]interface{}); ok {
+									if code, ok := errMap["code"].(float64); ok && int(code) == http.StatusTooManyRequests {
+										if attempt < maxRetries {
+											backoffBase := 5 * (1 << uint(attempt))
+											retryAfter := float64(backoffBase) + rand.Float64()*2
+											logger.Warn("Rate limited (207 Multi-Status), retrying", "retry_after", retryAfter)
+											select {
+											case <-ctx.Done():
+												return nil, nil, fmt.Errorf("context cancelled during 207 retry backoff: %w", ctx.Err())
+											case <-time.After(time.Duration(retryAfter * float64(time.Second))):
 											}
-											return nil, nil, fmt.Errorf("rate limit exceeded (207 Multi-Status) after %d retries", maxRetries)
+											continue
 										}
+										return nil, nil, fmt.Errorf("rate limit exceeded (207 Multi-Status) after %d retries", maxRetries)
 									}
 								}
 							}
 						}
-						// Successfully parsed 207 response with IOC data
-						return iocs, meta, nil
 					}
+					// Successfully parsed 207 response with IOC data
+					return iocs, meta, nil
 				}
 
 				// Check for rate limiting (429) errors - use exponential backoff
