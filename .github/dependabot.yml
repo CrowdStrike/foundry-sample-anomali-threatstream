@@ -4,7 +4,20 @@ updates:
     directory: "/functions/anomali-ioc-ingest/"
     schedule:
       interval: weekly
+  - package-ecosystem: gomod
+    directory: "/functions/anomali-ioc-ingest/"
+    schedule:
+      interval: weekly
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "actions/checkout"
+        versions: [">=6.0.2"]
+      - dependency-name: "actions/setup-node"
+        versions: [">=6.2.0"]
+      - dependency-name: "actions/setup-python"
+        versions: [">=6.1.0"]
+      - dependency-name: "peter-evans/create-pull-request"
+        versions: [">=8.0.0"]

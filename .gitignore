@@ -1,10 +1,15 @@
 # Python
 __pycache__/
 *.py[cod]
+venv/
 .venv/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Go
+go.sum
+functions/anomali-ioc-ingest/anomali-ioc-ingest
 
 # IDEs
 .idea/

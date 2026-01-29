@@ -39,6 +39,7 @@ Provides automated threat intelligence ingestion from Anomali ThreatStream APIs 
 - `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100)
 - `confidence_lt`: Filter IOCs with confidence score less than specified value (0-100)
 - `confidence_lte`: Filter IOCs with confidence score less than or equal to specified value (0-100)
+- `fail_fast_enabled`: Enable early file size estimation to fail fast if projected size exceeds 200 MB limit (default: false)
 
 ### Filtering by Feed ID
 
@@ -166,6 +167,56 @@ actions:
 After editing the YAML, redeploy the app using `foundry apps deploy`.
 
 **Understanding Confidence Scores**: Anomali ThreatStream assigns confidence scores based on multiple factors including source reliability, corroboration from multiple feeds, and historical accuracy. A score of 70+ generally indicates high-confidence threat intelligence suitable for automated blocking, while scores below 50 may require additional investigation before taking action.
+
+### Fail-Fast File Size Estimation
+
+For large IOC datasets, the function can estimate final file sizes after processing the first batch of data. This prevents wasting hours on pagination only to fail at the end when a file exceeds the 200 MB Falcon Next-Gen SIEM upload limit.
+
+**Parameter**: `fail_fast_enabled` (default: `false`)
+
+When enabled, the function:
+1. Processes the first batch of IOCs
+2. Calculates bytes per record and distribution by IOC type
+3. Projects final file sizes based on Anomali's `total_count` metadata
+4. Fails immediately with actionable guidance if any file would exceed 200 MB
+
+**When to Enable**: Enable fail-fast if you're ingesting a large ThreatStream dataset for the first time and want early feedback on whether filtering is needed.
+
+**When to Disable**: Keep disabled (default) when you want the function to process as much data as possible before hitting limits, or when you're incrementally syncing smaller batches.
+
+#### Configuring Fail-Fast in the Workflow
+
+Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
+
+```yaml
+actions:
+    AnomaliIngest:
+        properties:
+            fail_fast_enabled: true  # Enable early file size validation
+            limit: 1000
+            repository: search-all
+            status: active
+```
+
+Also update the loop action with the same setting:
+
+```yaml
+loops:
+    Loop:
+        actions:
+            AnomaliIngest2:
+                properties:
+                    fail_fast_enabled: true  # Must match AnomaliIngest setting
+                    limit: 1000
+                    next: ${data['WorkflowCustomVariable.next']}
+                    repository: search-all
+                    status: active
+```
+
+**If fail-fast triggers**, the error message suggests filtering strategies:
+1. Use `feed_id` to limit ingestion to specific threat feeds
+2. Use `confidence_gte` to filter low-confidence IOCs (e.g., `confidence_gte: 70`)
+3. Use `type` parameter to ingest specific IOC types separately
 
 ## Data Output
 

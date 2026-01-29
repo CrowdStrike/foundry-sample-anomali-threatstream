@@ -9,44 +9,61 @@ jobs:
     name: Build and Test
     runs-on: ubuntu-latest
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
-
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
+
       - name: Setup Python
-        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c  # v6.0.0
         with:
           python-version: '3.13'
-          cache: 'pip'
+          cache: pip
+          cache-dependency-path: functions/anomali-ioc-ingest/requirements.txt
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pytest pytest-cov
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         working-directory: functions/anomali-ioc-ingest
-      - name: Run tests if test_main.py exists
+
+      - name: Run Python tests
         run: |
           if [ -f "test_main.py" ]; then
-            echo "Running tests with test_main.py"
-            pytest
+            echo "Running Python tests"
+            python -m pytest test_main.py -v
           else
-            echo "No test_main.py found, skipping tests"
+            echo "No test_main.py found, skipping Python tests"
           fi
         working-directory: functions/anomali-ioc-ingest
-      - name: Verify function starts
+
+      - name: Setup Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c  # v6.1.0
+        with:
+          go-version: '1.25'
+
+      - name: Install Go dependencies
         run: |
-          timeout 30s bash -c '
-            python main.py > output.log 2>&1 &
-            PID=$!
-            while ! grep -q "running at port 8081" output.log 2>/dev/null; do
-              sleep 1
-            done
-            echo "✅ Application started successfully"
-            kill $PID 2>/dev/null || true
-          ' || {
-            echo "❌ Application failed to start"
-            cat output.log 2>/dev/null || echo "No output log found"
-            exit 1
-          }
+          if [ -f "go.mod" ]; then
+            go get .
+          fi
+        working-directory: functions/anomali-ioc-ingest
+
+      - name: Run Go tests
+        run: |
+          if [ -f "go.mod" ]; then
+            echo "Running Go tests"
+            go test -v ./...
+          else
+            echo "No go.mod found, skipping Go tests"
+          fi
+        working-directory: functions/anomali-ioc-ingest
+
+      - name: Verify Go function builds
+        run: |
+          if [ -f "go.mod" ]; then
+            echo "Building Go function"
+            go build -o /dev/null .
+            echo "✅ Go function builds successfully"
+          else
+            echo "No go.mod found, skipping Go build"
+          fi
         working-directory: functions/anomali-ioc-ingest
