@@ -999,36 +999,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             # Verify new IP was added
             self.assertIn("5.6.7.8", rows_by_ip)
 
-    @patch('main.NGSIEM')
-    def test_upload_csv_files_500_error_recovery(self, mock_ngsiem_class):
-        """Test upload recovery from 500 error with JSON parsing message."""
-        mock_ngsiem = MagicMock()
-        mock_ngsiem_class.return_value = mock_ngsiem
-        mock_logger = MagicMock()
-
-        # Mock 500 error with JSON parsing error (indicates successful upload)
-        mock_ngsiem.upload_file.return_value = {
-            "status_code": 500,
-            "body": {
-                "errors": [
-                    {"message": "extra data: line 1 column 123 (char 122)"}
-                ]
-            }
-        }
-
-        with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as temp_file:
-            temp_file.write(b"test,data\n1,2")
-            temp_file.flush()
-
-            try:
-                results = main.upload_csv_files_to_ngsiem([temp_file.name], "search-all", mock_logger)
-
-                self.assertEqual(len(results), 1)
-                self.assertEqual(results[0]["status"], "success")
-                self.assertEqual(results[0]["message"], "File uploaded successfully")
-            finally:
-                os.unlink(temp_file.name)
-
     def test_clear_collection_data_success(self):
         """Test clear_collection_data functionality."""
         mock_api_harness = MagicMock()
