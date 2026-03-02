@@ -22,6 +22,6 @@ updates:
       - dependency-name: "peter-evans/create-pull-request"
         versions: [">=8.0.0"]
       - dependency-name: "actions/upload-artifact"
-        versions: [">=6.0.0"]
+        versions: [">=7.0.0"]
       - dependency-name: "actions/setup-go"
         versions: [">=6.2.0"]
