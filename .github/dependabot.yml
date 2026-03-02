@@ -24,4 +24,4 @@ updates:
       - dependency-name: "actions/upload-artifact"
         versions: [">=7.0.0"]
       - dependency-name: "actions/setup-go"
-        versions: [">=6.2.0"]
+        versions: [">=6.3.0"]
