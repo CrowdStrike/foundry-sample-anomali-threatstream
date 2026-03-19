@@ -144,8 +144,7 @@ export class AppCatalogPage extends BasePage {
       const totalCount = textCount + passwordCount;
       this.logger.info(`API configuration form detected with ${textCount} text fields and ${passwordCount} password fields (${totalCount} total)`);
     } catch (error) {
-      this.logger.info('No API configuration required - no input fields found');
-      return;
+      throw new Error('This app should prompt for API credentials');
     }
 
     this.logger.info('API configuration required, filling dummy values');
