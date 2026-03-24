@@ -144,8 +144,7 @@ export class AppCatalogPage extends BasePage {
       const totalCount = textCount + passwordCount;
       this.logger.info(`API configuration form detected with ${textCount} text fields and ${passwordCount} password fields (${totalCount} total)`);
     } catch (error) {
-      this.logger.info('No API configuration required - no input fields found');
-      return;
+      throw new Error('This app should prompt for API credentials');
     }
 
     this.logger.info('API configuration required, filling dummy values');
@@ -191,12 +190,13 @@ export class AppCatalogPage extends BasePage {
   }
 
   /**
-   * Click the final "Install app" button
+   * Click the final "Save and install" button
    */
   private async clickInstallAppButton(): Promise<void> {
-    const installButton = this.page.getByRole('button', { name: 'Install app' });
+    const installButton = this.page.getByRole('button', { name: 'Save and install' })
+      .or(this.page.getByRole('button', { name: 'Install app' }));
 
-    await this.waiter.waitForVisible(installButton, { description: 'Install app button' });
+    await this.waiter.waitForVisible(installButton, { description: 'Save and install button' });
 
     // Wait for button to be enabled
     await installButton.waitFor({ state: 'visible', timeout: 10000 });
@@ -205,8 +205,8 @@ export class AppCatalogPage extends BasePage {
     // Simple delay for form to enable button
     await this.waiter.delay(1000);
 
-    await this.smartClick(installButton, 'Install app button');
-    this.logger.info('Clicked Install app button');
+    await this.smartClick(installButton, 'Save and install button');
+    this.logger.info('Clicked Save and install button');
   }
 
   /**
