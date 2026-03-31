@@ -54,7 +54,7 @@ from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse, parse_qs
 
 from crowdstrike.foundry.function import Function, Request, Response, APIError
-from falconpy import APIIntegrations, NGSIEM, APIHarnessV2
+from falconpy import APIIntegrations, NGSIEM, CustomStorage
 
 
 FUNC = Function.instance()
@@ -225,7 +225,7 @@ JOB_COMPLETED = "completed"
 JOB_FAILED = "failed"
 
 def get_last_update_id(
-    api_client: APIHarnessV2, headers: Dict[str, str], ioc_type: Optional[str], logger: Logger
+    api_client: CustomStorage, headers: Dict[str, str], ioc_type: Optional[str], logger: Logger
 ) -> Optional[Dict]:
     """Get the last update_id from collections for incremental sync"""
     # Use simple per-type key: last_update_ip, last_update_domain, etc.
@@ -238,10 +238,9 @@ def get_last_update_id(
 
     # Try to get the object directly
     try:
-        response = api_client.command("GetObject",
+        response = api_client.GetObject(
                                     collection_name=COLLECTION_UPDATE_TRACKER,
-                                    object_key=object_key,
-                                    headers=headers)
+                                    object_key=object_key)
 
         # GetObject returns bytes directly, need to decode
         update_data = json.loads(response.decode("utf-8"))
@@ -259,7 +258,7 @@ def get_last_update_id(
         return None
 
 def save_update_id(
-    api_client: APIHarnessV2,
+    api_client: CustomStorage,
     headers: Dict[str, str],
     update_data: Dict,
     ioc_type: Optional[str],
@@ -275,11 +274,10 @@ def save_update_id(
 
         logger.info(f"Saving update_id to collections with key {object_key}: {update_data}")
 
-        response = api_client.command("PutObject",
+        response = api_client.PutObject(
                                     body=update_data,
                                     collection_name=COLLECTION_UPDATE_TRACKER,
-                                    object_key=object_key,
-                                    headers=headers)
+                                    object_key=object_key)
 
         if response["status_code"] != 200:
             raise CollectionError(f"Failed to save update_id: {response}")
@@ -294,7 +292,7 @@ def save_update_id(
         raise
 
 def create_job(
-    api_client: APIHarnessV2,
+    api_client: CustomStorage,
     headers: Dict[str, str],
     last_update: Optional[Dict],
     ioc_type: Optional[str],
@@ -371,11 +369,10 @@ def create_job(
     try:
         logger.info(f"Creating job: {job}")
 
-        response = api_client.command("PutObject",
+        response = api_client.PutObject(
                                     body=job,
                                     collection_name=COLLECTION_INGEST_JOBS,
-                                    object_key=job_id,
-                                    headers=headers)
+                                    object_key=job_id)
 
         if response["status_code"] != 200:
             raise JobError(f"Failed to create job: {response}")
@@ -387,7 +384,7 @@ def create_job(
         logger.error(f"Error creating job: {str(e)}", exc_info=True)
         raise
 
-def update_job(api_client: APIHarnessV2, headers: Dict[str, str], job: Dict, logger: Logger):
+def update_job(api_client: CustomStorage, headers: Dict[str, str], job: Dict, logger: Logger):
     """Update job status in collections or log in test mode"""
     # Check if we're in test mode
     test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
@@ -400,11 +397,10 @@ def update_job(api_client: APIHarnessV2, headers: Dict[str, str], job: Dict, log
     try:
         logger.info(f"Updating job {job["id"]} with state: {job["state"]}")
 
-        response = api_client.command("PutObject",
+        response = api_client.PutObject(
                                     body=job,
                                     collection_name=COLLECTION_INGEST_JOBS,
-                                    object_key=job["id"],
-                                    headers=headers)
+                                    object_key=job["id"])
 
         if response["status_code"] != 200:
             raise JobError(f"Failed to update job: {response}")
@@ -794,7 +790,7 @@ def download_existing_lookup_files_from_ngsiem(
     return existing_files
 
 def clear_collection_data(
-    api_client: APIHarnessV2, headers: Dict[str, str], logger: Logger
+    api_client: CustomStorage, headers: Dict[str, str], logger: Logger
 ):
     """Clear collection data when starting from scratch"""
     try:
@@ -808,10 +804,9 @@ def clear_collection_data(
 
         for key in update_keys:
             try:
-                api_client.command("DeleteObject",
+                api_client.DeleteObject(
                                  collection_name=COLLECTION_UPDATE_TRACKER,
-                                 object_key=key,
-                                 headers=headers)
+                                 object_key=key)
                 logger.info(f"Cleared update tracker data for key: {key}")
             except Exception as e:
                 logger.info(f"No update tracker data to clear for key {key}: {str(e)}")
@@ -831,17 +826,16 @@ def clear_collection_data(
         logger.error(f"Error clearing collection data: {str(e)}")
 
 def clear_update_id_for_type(
-    api_client: APIHarnessV2, headers: Dict[str, str], ioc_type: str, logger: Logger
+    api_client: CustomStorage, headers: Dict[str, str], ioc_type: str, logger: Logger
 ):
     """Clear the update_id for a specific IOC type when its lookup file is missing"""
     try:
         object_key = f"{KEY_LAST_UPDATE}_{ioc_type}"
         logger.info(f"Clearing update_id for type {ioc_type} (key: {object_key})")
 
-        api_client.command("DeleteObject",
+        api_client.DeleteObject(
                          collection_name=COLLECTION_UPDATE_TRACKER,
-                         object_key=object_key,
-                         headers=headers)
+                         object_key=object_key)
         logger.info(f"Successfully cleared update_id for type {ioc_type}")
 
     except Exception as e:
@@ -1364,7 +1358,7 @@ def check_and_recover_missing_files(
     repository: str,
     type_filter: Optional[str],
     temp_dir: str,
-    api_client: APIHarnessV2,
+    api_client: CustomStorage,
     headers: Dict[str, str],
     logger: Logger
 ) -> tuple[bool, Dict[str, str]]:
@@ -1428,10 +1422,9 @@ def check_and_recover_missing_files(
                 # Also clear the main last_update key
                 logger.info("Clearing main last_update key to ensure fresh start for missing file types")
                 try:
-                    api_client.command("DeleteObject",
+                    api_client.DeleteObject(
                                      collection_name=COLLECTION_UPDATE_TRACKER,
-                                     object_key=KEY_LAST_UPDATE,
-                                     headers=headers)
+                                     object_key=KEY_LAST_UPDATE)
                     logger.info("Successfully cleared main last_update key")
                 except Exception as e:
                     logger.info(f"Main last_update key was already cleared or didn't exist: {str(e)}")
@@ -1528,14 +1521,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
         # Initialize clients
         api_integrations = APIIntegrations()
-        api_client = APIHarnessV2()
-
-        # Set up headers for collections
-        # Note: X-CS-APP-ID is needed for local development when accessing collections
-        # In production, Foundry automatically sets this header
+        # Use CustomStorage service class for collections — ext_headers bakes in
+        # X-CS-APP-ID for local development; in production Foundry sets it automatically
         headers = {}
         if os.environ.get("APP_ID"):
             headers = {"X-CS-APP-ID": os.environ.get("APP_ID")}
+        api_client = CustomStorage(ext_headers=headers)
 
         # Create temp_dir early for disk-based streaming (O(1) memory)
         # This is used for downloading existing files and creating new CSV files
