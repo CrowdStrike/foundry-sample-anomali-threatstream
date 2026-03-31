@@ -51,7 +51,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # Mock GetObject to raise exception (object doesn't exist)
         mock_api_harness.GetObject.side_effect = Exception("Object not found")
 
-        result = main.get_last_update_id(mock_api_harness, headers, None, mock_logger)
+        result = main.get_last_update_id(mock_api_harness, None, mock_logger)
 
         self.assertIsNone(result)
         mock_logger.info.assert_called_with("No previous update_id found for all types, will fetch recent data")
@@ -70,7 +70,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # Mock GetObject response - function uses direct GetObject approach
         mock_api_harness.GetObject.return_value = json.dumps(update_data).encode('utf-8')
 
-        result = main.get_last_update_id(mock_api_harness, headers, None, mock_logger)
+        result = main.get_last_update_id(mock_api_harness, None, mock_logger)
 
         self.assertEqual(result, update_data)
 
@@ -82,7 +82,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # Mock the GetObject method to raise an exception (object not found)
         mock_api_harness.GetObject.side_effect = Exception("Object not found")
 
-        result = main.get_last_update_id(mock_api_harness, {}, None, mock_logger)
+        result = main.get_last_update_id(mock_api_harness, None, mock_logger)
 
         # Should return None when object doesn't exist
         self.assertIsNone(result)
@@ -96,7 +96,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         update_data = {"update_id": "12345"}
         mock_api_harness.PutObject.return_value = {"status_code": 200}
 
-        main.save_update_id(mock_api_harness, headers, update_data, None, mock_logger)
+        main.save_update_id(mock_api_harness, update_data, None, mock_logger)
 
         mock_api_harness.PutObject.assert_called_once_with(body=update_data,
                                                        collection_name="update_id_tracker",
@@ -111,7 +111,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_custom_storage.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(Exception):
-            main.save_update_id(mock_custom_storage, {}, update_data, None, mock_logger)
+            main.save_update_id(mock_custom_storage, update_data, None, mock_logger)
 
     def test_create_job_first_run(self):
         """Test create_job for first run (no previous update)."""
@@ -127,7 +127,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             mock_uuid_obj.__str__ = MagicMock(return_value="test-job-id-12345678")
             mock_uuid.return_value = mock_uuid_obj
 
-            result = main.create_job(mock_api_harness, headers, None, None, mock_logger)
+            result = main.create_job(mock_api_harness, None, None, mock_logger)
 
             self.assertEqual(result["state"], "running")
             self.assertEqual(result["parameters"]["status"], "active")
@@ -152,7 +152,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             mock_uuid_obj.__str__ = MagicMock(return_value="test-job-id-12345678")
             mock_uuid.return_value = mock_uuid_obj
 
-            result = main.create_job(mock_api_harness, headers, last_update, "hash", mock_logger)
+            result = main.create_job(mock_api_harness, last_update, "hash", mock_logger)
 
             self.assertEqual(result["parameters"]["update_id__gt"], "12345")
 
@@ -277,9 +277,9 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         # Verify update_id clearing for missing file types
         expected_clear_calls = [
-            call(mock_api_harness, {}, "url", mock_logger),
-            call(mock_api_harness, {}, "email", mock_logger),
-            call(mock_api_harness, {}, "hash", mock_logger),  # All hash types use "hash"
+            call(mock_api_harness, "url", mock_logger),
+            call(mock_api_harness, "email", mock_logger),
+            call(mock_api_harness, "hash", mock_logger),  # All hash types use "hash"
         ]
         mock_clear_update_id.assert_has_calls(expected_clear_calls, any_order=True)
 
@@ -1039,7 +1039,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         ]
 
         # Should not raise exception
-        main.clear_collection_data(mock_api_harness, headers, mock_logger)
+        main.clear_collection_data(mock_api_harness, mock_logger)
 
         # Verify all delete operations were called
         # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
@@ -1055,7 +1055,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_api_harness.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(main.CollectionError):
-            main.save_update_id(mock_api_harness, headers, update_data, "ip", mock_logger)
+            main.save_update_id(mock_api_harness, update_data, "ip", mock_logger)
 
     def test_update_job_success(self):
         """Test update_job success."""
@@ -1066,7 +1066,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {"id": "test-job", "state": "completed"}
         mock_api_harness.PutObject.return_value = {"status_code": 200}
 
-        main.update_job(mock_api_harness, headers, job, mock_logger)
+        main.update_job(mock_api_harness, job, mock_logger)
 
         mock_api_harness.PutObject.assert_called_once_with(body=job,
                                                        collection_name="ingest_jobs",
@@ -1303,7 +1303,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_api_client.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(main.JobError):
-            main.create_job(mock_api_client, mock_headers, None, "ip", mock_logger)
+            main.create_job(mock_api_client, None, "ip", mock_logger)
 
     def test_build_query_params_no_job_no_update(self):
         """Test build_query_params when no job exists and no saved update_id."""
@@ -1370,7 +1370,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         mock_api_client.DeleteObject.return_value = {"status_code": 200}
 
-        main.clear_update_id_for_type(mock_api_client, mock_headers, "ip", mock_logger)
+        main.clear_update_id_for_type(mock_api_client, "ip", mock_logger)
 
         mock_api_client.DeleteObject.assert_called_once_with(
             collection_name="update_id_tracker",
@@ -1387,7 +1387,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_api_client.DeleteObject.side_effect = Exception("Object not found")
 
         # Should not raise exception, just log
-        main.clear_update_id_for_type(mock_api_client, mock_headers, "domain", mock_logger)
+        main.clear_update_id_for_type(mock_api_client, "domain", mock_logger)
 
         mock_logger.info.assert_any_call("No update_id to clear for type domain: Object not found")
 
@@ -1401,7 +1401,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_api_client.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(main.JobError):
-            main.update_job(mock_api_client, mock_headers, job, mock_logger)
+            main.update_job(mock_api_client, job, mock_logger)
 
     def test_get_last_update_id_with_errors(self):
         """Test get_last_update_id with various error scenarios."""
@@ -1414,7 +1414,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger.info.side_effect = RuntimeError("Logger error")
 
         with self.assertRaises(RuntimeError):
-            main.get_last_update_id(mock_api_client, mock_headers, "ip", mock_logger)
+            main.get_last_update_id(mock_api_client, "ip", mock_logger)
 
     def test_clear_collection_data_error_handling(self):
         """Test clear_collection_data error handling."""
@@ -1436,7 +1436,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         ]
 
         # Should not raise exception, just log errors
-        main.clear_collection_data(mock_api_client, mock_headers, mock_logger)
+        main.clear_collection_data(mock_api_client, mock_logger)
 
         # Verify the expected number of calls were made
         # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
@@ -1484,7 +1484,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_api_client.PutObject.side_effect = RuntimeError("Unexpected error")
 
         with self.assertRaises(RuntimeError):
-            main.save_update_id(mock_api_client, mock_headers, update_data, "ip", mock_logger)
+            main.save_update_id(mock_api_client, update_data, "ip", mock_logger)
 
     def test_build_query_params_with_job_update_id(self):
         """Test build_query_params uses job's stored update_id."""
@@ -1754,7 +1754,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             mock_uuid.return_value = mock_uuid_obj
 
             # Test with no IOC type
-            result = main.create_job(mock_api_harness, headers, None, None, mock_logger)
+            result = main.create_job(mock_api_harness, None, None, mock_logger)
 
             # Verify mock job structure for test mode
             self.assertTrue(result["id"].startswith("test_"))
@@ -1765,7 +1765,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertNotIn("type", result["parameters"])  # No type filter for all types
 
             # Test with specific IOC type
-            result_typed = main.create_job(mock_api_harness, headers, None, "ip", mock_logger)
+            result_typed = main.create_job(mock_api_harness, None, "ip", mock_logger)
 
             # Verify type-specific mock job
             self.assertTrue(result_typed["id"].endswith("_ip"))
@@ -1787,7 +1787,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         job = {"id": "test-job-123", "state": "completed"}
 
-        main.update_job(mock_api_harness, headers, job, mock_logger)
+        main.update_job(mock_api_harness, job, mock_logger)
 
         # Verify no actual API calls were made in test mode
         mock_api_harness.PutObject.assert_not_called()

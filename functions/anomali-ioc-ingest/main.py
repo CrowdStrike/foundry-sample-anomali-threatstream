@@ -225,7 +225,7 @@ JOB_COMPLETED = "completed"
 JOB_FAILED = "failed"
 
 def get_last_update_id(
-    api_client: CustomStorage, headers: Dict[str, str], ioc_type: Optional[str], logger: Logger
+    api_client: CustomStorage, ioc_type: Optional[str], logger: Logger
 ) -> Optional[Dict]:
     """Get the last update_id from collections for incremental sync"""
     # Use simple per-type key: last_update_ip, last_update_domain, etc.
@@ -259,7 +259,6 @@ def get_last_update_id(
 
 def save_update_id(
     api_client: CustomStorage,
-    headers: Dict[str, str],
     update_data: Dict,
     ioc_type: Optional[str],
     logger: Logger
@@ -293,7 +292,6 @@ def save_update_id(
 
 def create_job(
     api_client: CustomStorage,
-    headers: Dict[str, str],
     last_update: Optional[Dict],
     ioc_type: Optional[str],
     logger: Logger
@@ -384,7 +382,7 @@ def create_job(
         logger.error(f"Error creating job: {str(e)}", exc_info=True)
         raise
 
-def update_job(api_client: CustomStorage, headers: Dict[str, str], job: Dict, logger: Logger):
+def update_job(api_client: CustomStorage, job: Dict, logger: Logger):
     """Update job status in collections or log in test mode"""
     # Check if we're in test mode
     test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
@@ -790,7 +788,7 @@ def download_existing_lookup_files_from_ngsiem(
     return existing_files
 
 def clear_collection_data(
-    api_client: CustomStorage, headers: Dict[str, str], logger: Logger
+    api_client: CustomStorage, logger: Logger
 ):
     """Clear collection data when starting from scratch"""
     try:
@@ -826,7 +824,7 @@ def clear_collection_data(
         logger.error(f"Error clearing collection data: {str(e)}")
 
 def clear_update_id_for_type(
-    api_client: CustomStorage, headers: Dict[str, str], ioc_type: str, logger: Logger
+    api_client: CustomStorage, ioc_type: str, logger: Logger
 ):
     """Clear the update_id for a specific IOC type when its lookup file is missing"""
     try:
@@ -1359,7 +1357,6 @@ def check_and_recover_missing_files(
     type_filter: Optional[str],
     temp_dir: str,
     api_client: CustomStorage,
-    headers: Dict[str, str],
     logger: Logger
 ) -> tuple[bool, Dict[str, str]]:
     """Check for existing lookup files and handle missing file recovery.
@@ -1369,7 +1366,6 @@ def check_and_recover_missing_files(
         type_filter: Optional IOC type filter
         temp_dir: Temporary directory for streaming file downloads
         api_client: API client for collections access
-        headers: Request headers
         logger: Logger instance
 
     Returns:
@@ -1417,7 +1413,7 @@ def check_and_recover_missing_files(
                     else:
                         collection_type = filename_base
 
-                    clear_update_id_for_type(api_client, headers, collection_type, logger)
+                    clear_update_id_for_type(api_client, collection_type, logger)
 
                 # Also clear the main last_update key
                 logger.info("Clearing main last_update key to ensure fresh start for missing file types")
@@ -1538,7 +1534,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             # Check for existing files and handle missing file recovery
             # Files are streamed directly to temp_dir (not held in memory)
             should_start_fresh, existing_files = check_and_recover_missing_files(
-                repository, type_filter, temp_dir, api_client, headers, logger
+                repository, type_filter, temp_dir, api_client, logger
             )
 
             phase1_elapsed = time.time() - phase1_start
@@ -1549,7 +1545,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
             if should_start_fresh:
                 logger.info("Starting completely fresh sync - clearing all collection data")
-                clear_collection_data(api_client, headers, logger)
+                clear_collection_data(api_client, logger)
 
             # For pagination calls, skip job creation and use workflow parameters
             if next_token:
@@ -1560,10 +1556,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 logger.info("Initial call - creating type-specific job")
 
                 # Get type-specific update_id
-                last_update = get_last_update_id(api_client, headers, type_filter, logger)
+                last_update = get_last_update_id(api_client, type_filter, logger)
 
                 # Create type-specific job
-                job = create_job(api_client, headers, last_update, type_filter, logger)
+                job = create_job(api_client, last_update, type_filter, logger)
 
             try:
                 # Build query parameters using extracted helper function
@@ -1590,7 +1586,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     # Mark job as completed even with no data (if job exists)
                     if job:
                         job["state"] = JOB_COMPLETED
-                        update_job(api_client, headers, job, logger)
+                        update_job(api_client, job, logger)
 
                     return Response(
                         body={
@@ -1617,7 +1613,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     # Mark job as completed but no valid data (if job exists)
                     if job:
                         job["state"] = JOB_COMPLETED
-                        update_job(api_client, headers, job, logger)
+                        update_job(api_client, job, logger)
 
                     return Response(
                         body={
@@ -1666,12 +1662,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     }
 
                     # Save state for the appropriate type (single type or all types)
-                    save_update_id(api_client, headers, update_data, type_filter, logger)
+                    save_update_id(api_client, update_data, type_filter, logger)
 
                 # Mark job as completed (if job exists)
                 if job:
                     job["state"] = JOB_COMPLETED
-                    update_job(api_client, headers, job, logger)
+                    update_job(api_client, job, logger)
 
                 # Prepare response with consistent next field
                 response_body = {
@@ -1706,7 +1702,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 if job:
                     job["state"] = JOB_FAILED
                     job["error"] = str(e)
-                    update_job(api_client, headers, job, logger)
+                    update_job(api_client, job, logger)
                 raise
 
     except Exception as e:
