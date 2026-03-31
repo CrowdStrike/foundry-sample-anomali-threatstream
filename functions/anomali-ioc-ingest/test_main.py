@@ -49,7 +49,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         headers = {"X-CS-APP-ID": "test-app"}
 
         # Mock GetObject to raise exception (object doesn't exist)
-        mock_api_harness.command.side_effect = Exception("Object not found")
+        mock_api_harness.GetObject.side_effect = Exception("Object not found")
 
         result = main.get_last_update_id(mock_api_harness, headers, None, mock_logger)
 
@@ -68,7 +68,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         }
 
         # Mock GetObject response - function uses direct GetObject approach
-        mock_api_harness.command.return_value = json.dumps(update_data).encode('utf-8')
+        mock_api_harness.GetObject.return_value = json.dumps(update_data).encode('utf-8')
 
         result = main.get_last_update_id(mock_api_harness, headers, None, mock_logger)
 
@@ -79,8 +79,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_api_harness = MagicMock()
         mock_logger = MagicMock()
 
-        # Mock the command method to raise an exception (object not found)
-        mock_api_harness.command.side_effect = Exception("Object not found")
+        # Mock the GetObject method to raise an exception (object not found)
+        mock_api_harness.GetObject.side_effect = Exception("Object not found")
 
         result = main.get_last_update_id(mock_api_harness, {}, None, mock_logger)
 
@@ -94,15 +94,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         headers = {"X-CS-APP-ID": "test-app"}
 
         update_data = {"update_id": "12345"}
-        mock_api_harness.command.return_value = {"status_code": 200}
+        mock_api_harness.PutObject.return_value = {"status_code": 200}
 
         main.save_update_id(mock_api_harness, headers, update_data, None, mock_logger)
 
-        mock_api_harness.command.assert_called_once_with("PutObject",
-                                                       body=update_data,
+        mock_api_harness.PutObject.assert_called_once_with(body=update_data,
                                                        collection_name="update_id_tracker",
-                                                       object_key="last_update",
-                                                       headers=headers)
+                                                       object_key="last_update")
 
     def test_save_update_id_error(self):
         """Test save_update_id error handling."""
@@ -110,7 +108,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         update_data = {"update_id": "12345"}
-        mock_custom_storage.upload_object.return_value = {"status_code": 500}
+        mock_custom_storage.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(Exception):
             main.save_update_id(mock_custom_storage, {}, update_data, None, mock_logger)
@@ -121,7 +119,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
         headers = {"X-CS-APP-ID": "test-app"}
 
-        mock_api_harness.command.return_value = {"status_code": 200}
+        mock_api_harness.PutObject.return_value = {"status_code": 200}
 
         with patch('uuid.uuid4') as mock_uuid:
             # Create a mock UUID object that supports str() and slicing
@@ -146,7 +144,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         headers = {"X-CS-APP-ID": "test-app"}
 
         last_update = {"update_id": "12345"}
-        mock_api_harness.command.return_value = {"status_code": 200}
+        mock_api_harness.PutObject.return_value = {"status_code": 200}
 
         with patch('uuid.uuid4') as mock_uuid:
             # Create a mock UUID object that supports str() and slicing
@@ -209,7 +207,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                      "Should use descriptive definition_id='Anomali API'")
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     @patch('main.download_existing_lookup_files')
     @patch('main.clear_update_id_for_type')
     @patch('main.NGSIEM')
@@ -242,22 +240,20 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             # Missing: url, email, hash_md5, hash_sha1, hash_sha256 files
         }
 
-        # Mock successful API responses
-        mock_api_harness.command.side_effect = [
-            # clear_update_id_for_type calls for missing files
-            {"status_code": 200},  # url type
-            {"status_code": 200},  # email type
-            {"status_code": 200},  # hash type (for hash_md5)
-            {"status_code": 200},  # hash type (for hash_sha1)
-            {"status_code": 200},  # hash type (for hash_sha256)
-            # clear main last_update key
-            {"status_code": 200},
-            # get_last_update_id (returns None for fresh start)
+        # Mock successful API responses - individual method side_effects for CustomStorage
+        # check_and_recover_missing_files: DeleteObject for main last_update key
+        mock_api_harness.DeleteObject.side_effect = [
+            {"status_code": 200},  # clear main last_update key
+        ]
+        # get_last_update_id: GetObject raises exception (not found)
+        mock_api_harness.GetObject.side_effect = [
             Exception("Object not found"),
-            # create_job
-            {"status_code": 200},
-            # save_update_id
-            {"status_code": 200},
+        ]
+        # create_job + save_update_id + update_job: PutObject calls
+        mock_api_harness.PutObject.side_effect = [
+            {"status_code": 200},  # create_job
+            {"status_code": 200},  # save_update_id
+            {"status_code": 200},  # update_job (completed)
         ]
 
         mock_api_integrations.execute_command_proxy.return_value = {
@@ -288,17 +284,15 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_clear_update_id.assert_has_calls(expected_clear_calls, any_order=True)
 
         # Verify main last_update key was cleared
-        mock_api_harness.command.assert_any_call(
-            "DeleteObject",
+        mock_api_harness.DeleteObject.assert_any_call(
             collection_name="update_id_tracker",
-            object_key="last_update",
-            headers={}
+            object_key="last_update"
         )
 
         self.assertEqual(response.code, 200)
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     @patch('main.NGSIEM')
     @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
     def test_no_valid_iocs_scenario(self, mock_ngsiem_class, mock_api_harness_class, mock_api_integrations_class):
@@ -323,13 +317,16 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         # Mock API responses - fresh start scenario requires clearing collection data
         # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
-        clear_calls = [Exception("Not found")] * 9  # Expected calls for clearing collection data
-        job_calls = [
-            Exception("Object not found"),  # get_last_update_id
+        mock_api_harness.DeleteObject.side_effect = [Exception("Not found")] * 9
+        # get_last_update_id
+        mock_api_harness.GetObject.side_effect = [
+            Exception("Object not found"),
+        ]
+        # create_job + update_job (mark as completed)
+        mock_api_harness.PutObject.side_effect = [
             {"status_code": 200},          # create_job
             {"status_code": 200},          # update_job (mark as completed)
         ]
-        mock_api_harness.command.side_effect = clear_calls + job_calls
 
         # Return IOCs with unknown/invalid types that can't be processed
         mock_api_integrations.execute_command_proxy.return_value = {
@@ -356,7 +353,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertNotIn("next", response.body)  # No next field when pagination complete
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
     def test_api_error_handling(self, mock_api_harness_class, mock_api_integrations_class):
         """Test API error handling in fetch_iocs_from_anomali (lines 552-556)."""
@@ -370,13 +367,12 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock collection operations to succeed
-        mock_api_harness.command.side_effect = [
-            # get_last_update_id
-            Exception("Object not found"),
-            # create_job
-            {"status_code": 200},
-            # update_job (mark as failed)
-            {"status_code": 200},
+        mock_api_harness.GetObject.side_effect = [
+            Exception("Object not found"),  # get_last_update_id
+        ]
+        mock_api_harness.PutObject.side_effect = [
+            {"status_code": 200},  # create_job
+            {"status_code": 200},  # update_job (mark as failed)
         ]
 
         # Simulate API integration throwing an exception after retries
@@ -593,7 +589,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 os.unlink(temp_file.name)
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     def test_on_post_success_minimal(self, mock_api_harness_class, mock_api_integrations_class):
         """Test successful POST request with minimal parameters."""
         # Setup mocks
@@ -605,18 +601,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         # Mock API harness commands for type-specific sync:
         # When type is provided but no existing files found, triggers fresh start
-        mock_api_harness.command.side_effect = [
-            # clear_collection_data calls - DeleteObject for each key
-            Exception("Object not found"),  # last_update
-            {"status_code": 200},          # last_update_ip
-            {"status_code": 200},          # last_update_domain
-            {"status_code": 200},          # last_update_url
-            {"status_code": 200},          # last_update_email
-            {"status_code": 200},          # last_update_hash
-            # get_last_update_id call - GetObject
-            Exception("Object not found"),  # GetObject for last update (not found - expected)
-            # save_update_id call - PutObject
-            {"status_code": 200},          # PutObject for save_update_id
+        mock_api_harness.GetObject.side_effect = [
+            Exception("Object not found"),  # get_last_update_id (not found - expected)
+        ]
+        mock_api_harness.PutObject.side_effect = [
+            {"status_code": 200},          # create_job
+            {"status_code": 200},          # save_update_id
+            {"status_code": 200},          # update_job (completed)
         ]
 
         # Mock Anomali API response
@@ -662,7 +653,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertNotIn("next", response.body)
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     def test_on_post_no_iocs_found(self, mock_api_harness_class, mock_api_integrations_class):
         """Test POST request when no IOCs are found."""
         # Setup mocks
@@ -678,8 +669,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # 3. update_job calls PutObject (success for completion)
         # Note: clear_update_id_for_type is no longer called when files are missing
         # (the update_id tracks API progress, not file existence)
-        mock_api_harness.command.side_effect = [
+        mock_api_harness.GetObject.side_effect = [
             Exception("Object not found"),  # GetObject for last update (not found - expected)
+        ]
+        mock_api_harness.PutObject.side_effect = [
             {"status_code": 200},          # PutObject for create_job
             {"status_code": 200},          # PutObject for update_job (completed)
         ]
@@ -716,7 +709,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertNotIn("next", response.body)
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     def test_on_post_anomali_api_error(self, mock_api_harness_class, mock_api_integrations_class):
         """Test POST request when Anomali API returns error."""
         # Setup mocks
@@ -727,8 +720,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock get_last_update_id (no previous update) - GetObject raises exception
-        mock_api_harness.command.side_effect = [
+        mock_api_harness.GetObject.side_effect = [
             Exception("Object not found"),  # GetObject for last update (not found)
+        ]
+        mock_api_harness.PutObject.side_effect = [
             {"status_code": 200},  # PutObject for create_job
             {"status_code": 200},  # PutObject for update_job (failed)
         ]
@@ -771,7 +766,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertIn("Supported types:", response.errors[0].message)
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     def test_on_post_rate_limiting_retry(self, mock_api_harness_class, mock_api_integrations_class):
         """Test POST request with rate limiting that succeeds on retry."""
         # Setup mocks
@@ -781,19 +776,14 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_api_harness_class.return_value = mock_api_harness
         mock_logger = MagicMock()
 
-        # Mock API harness commands - need collection clearing mocks since no existing files
-        mock_api_harness.command.side_effect = [
-            # clear_collection_data calls
-            Exception("Object not found"),  # last_update
-            {"status_code": 200},          # last_update_ip
-            {"status_code": 200},          # last_update_domain
-            {"status_code": 200},          # last_update_url
-            {"status_code": 200},          # last_update_email
-            {"status_code": 200},          # last_update_hash
-            # get_last_update_id call
-            Exception("Object not found"),  # GetObject for last update
-            # save_update_id call
-            {"status_code": 200},          # PutObject for save_update_id
+        # Mock API harness commands - need collection operations for type-specific sync
+        mock_api_harness.GetObject.side_effect = [
+            Exception("Object not found"),  # get_last_update_id (not found)
+        ]
+        mock_api_harness.PutObject.side_effect = [
+            {"status_code": 200},          # create_job
+            {"status_code": 200},          # save_update_id
+            {"status_code": 200},          # update_job (completed)
         ]
 
         # Mock rate limit on first call, success on second
@@ -1036,13 +1026,16 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         headers = {"X-CS-APP-ID": "test-app"}
 
         # Mock successful deletion responses
-        mock_api_harness.command.side_effect = [
+        mock_api_harness.DeleteObject.side_effect = [
             Exception("Object not found"),  # last_update (not found - OK)
             {"status_code": 200},          # last_update_ip
             {"status_code": 200},          # last_update_domain
             {"status_code": 200},          # last_update_url
             {"status_code": 200},          # last_update_email
             {"status_code": 200},          # last_update_hash
+            {"status_code": 200},          # last_update_hash_md5
+            {"status_code": 200},          # last_update_hash_sha1
+            {"status_code": 200},          # last_update_hash_sha256
         ]
 
         # Should not raise exception
@@ -1050,7 +1043,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         # Verify all delete operations were called
         # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
-        self.assertEqual(mock_api_harness.command.call_count, 9)
+        self.assertEqual(mock_api_harness.DeleteObject.call_count, 9)
 
     def test_save_update_id_error_handling(self):
         """Test save_update_id error handling."""
@@ -1059,7 +1052,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         headers = {"X-CS-APP-ID": "test-app"}
 
         update_data = {"update_id": "12345"}
-        mock_api_harness.command.return_value = {"status_code": 500}
+        mock_api_harness.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(main.CollectionError):
             main.save_update_id(mock_api_harness, headers, update_data, "ip", mock_logger)
@@ -1071,15 +1064,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         headers = {"X-CS-APP-ID": "test-app"}
 
         job = {"id": "test-job", "state": "completed"}
-        mock_api_harness.command.return_value = {"status_code": 200}
+        mock_api_harness.PutObject.return_value = {"status_code": 200}
 
         main.update_job(mock_api_harness, headers, job, mock_logger)
 
-        mock_api_harness.command.assert_called_once_with("PutObject",
-                                                       body=job,
+        mock_api_harness.PutObject.assert_called_once_with(body=job,
                                                        collection_name="ingest_jobs",
-                                                       object_key="test-job",
-                                                       headers=headers)
+                                                       object_key="test-job")
 
     def test_ioc_type_mappings_completeness(self):
         """Test that all IOC type mappings are complete."""
@@ -1094,7 +1085,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertIn('expiration_ts', mapping['columns'])
 
     @patch('main.APIIntegrations')
-    @patch('main.APIHarnessV2')
+    @patch('main.CustomStorage')
     def test_no_iocs_returns_no_next_field(self, mock_api_harness_class, mock_api_integrations_class):
         """Test that when no IOCs are found, next field is omitted from response."""
         # Setup mocks
@@ -1110,8 +1101,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # 3. update_job calls PutObject (success for completion)
         # Note: clear_update_id_for_type is no longer called when files are missing
         # (the update_id tracks API progress, not file existence)
-        mock_api_harness.command.side_effect = [
+        mock_api_harness.GetObject.side_effect = [
             Exception("Object not found"),  # GetObject for last update (not found)
+        ]
+        mock_api_harness.PutObject.side_effect = [
             {"status_code": 200},          # PutObject for create_job
             {"status_code": 200},          # PutObject for update_job (completed)
         ]
@@ -1307,7 +1300,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock PutObject to return error status
-        mock_api_client.command.return_value = {"status_code": 500}
+        mock_api_client.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(main.JobError):
             main.create_job(mock_api_client, mock_headers, None, "ip", mock_logger)
@@ -1375,15 +1368,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_headers = {"X-CS-APP-ID": "test-app"}
         mock_logger = MagicMock()
 
-        mock_api_client.command.return_value = {"status_code": 200}
+        mock_api_client.DeleteObject.return_value = {"status_code": 200}
 
         main.clear_update_id_for_type(mock_api_client, mock_headers, "ip", mock_logger)
 
-        mock_api_client.command.assert_called_once_with(
-            "DeleteObject",
+        mock_api_client.DeleteObject.assert_called_once_with(
             collection_name="update_id_tracker",
-            object_key="last_update_ip",
-            headers=mock_headers
+            object_key="last_update_ip"
         )
         mock_logger.info.assert_any_call("Successfully cleared update_id for type ip")
 
@@ -1393,7 +1384,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_headers = {"X-CS-APP-ID": "test-app"}
         mock_logger = MagicMock()
 
-        mock_api_client.command.side_effect = Exception("Object not found")
+        mock_api_client.DeleteObject.side_effect = Exception("Object not found")
 
         # Should not raise exception, just log
         main.clear_update_id_for_type(mock_api_client, mock_headers, "domain", mock_logger)
@@ -1407,7 +1398,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         job = {"id": "test-job", "state": "completed"}
-        mock_api_client.command.return_value = {"status_code": 500}
+        mock_api_client.PutObject.return_value = {"status_code": 500}
 
         with self.assertRaises(main.JobError):
             main.update_job(mock_api_client, mock_headers, job, mock_logger)
@@ -1419,7 +1410,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Test with logger.info failure (should re-raise from outer exception handler)
-        mock_api_client.command.return_value = b'{"update_id": "123"}'
+        mock_api_client.GetObject.return_value = b'{"update_id": "123"}'
         mock_logger.info.side_effect = RuntimeError("Logger error")
 
         with self.assertRaises(RuntimeError):
@@ -1432,10 +1423,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         # Mock one DeleteObject call to fail
-        mock_api_client.command.side_effect = [
+        mock_api_client.DeleteObject.side_effect = [
             Exception("Not found"),  # last_update (expected)
             RuntimeError("Unexpected error"),  # last_update_ip (unexpected)
             {"status_code": 200},  # remaining calls
+            {"status_code": 200},
+            {"status_code": 200},
+            {"status_code": 200},
             {"status_code": 200},
             {"status_code": 200},
             {"status_code": 200},
@@ -1446,7 +1440,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         # Verify the expected number of calls were made
         # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
-        self.assertEqual(mock_api_client.command.call_count, 9)
+        self.assertEqual(mock_api_client.DeleteObject.call_count, 9)
 
     def test_process_iocs_existing_file_parse_error(self):
         """Test process_iocs_to_csv with existing file parsing error."""
@@ -1487,7 +1481,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         update_data = {"update_id": "12345"}
 
         # Test with non-Exception error (should re-raise)
-        mock_api_client.command.side_effect = RuntimeError("Unexpected error")
+        mock_api_client.PutObject.side_effect = RuntimeError("Unexpected error")
 
         with self.assertRaises(RuntimeError):
             main.save_update_id(mock_api_client, mock_headers, update_data, "ip", mock_logger)
@@ -1779,7 +1773,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertEqual(result_typed["parameters"]["type"], "ip")
 
             # Verify no actual API calls were made in test mode
-            mock_api_harness.command.assert_not_called()
+            mock_api_harness.PutObject.assert_not_called()
 
             # Verify test mode log message
             mock_logger.info.assert_any_call(f"TEST MODE: Created mock job: {result}")
@@ -1796,7 +1790,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         main.update_job(mock_api_harness, headers, job, mock_logger)
 
         # Verify no actual API calls were made in test mode
-        mock_api_harness.command.assert_not_called()
+        mock_api_harness.PutObject.assert_not_called()
 
         # Verify test mode log message
         mock_logger.info.assert_called_with("TEST MODE: Mock job update for test-job-123 with state: completed")
@@ -1927,7 +1921,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger = MagicMock()
 
         with patch('main.APIIntegrations'), \
-             patch('main.APIHarnessV2') as mock_api_harness_class, \
+             patch('main.CustomStorage') as mock_api_harness_class, \
              patch('main.NGSIEM') as mock_ngsiem_class:
 
             mock_api_harness = MagicMock()
@@ -1938,14 +1932,17 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             # Mock that no existing files are found (return 404 dict)
             mock_ngsiem.get_file.return_value = {"status_code": 404}
 
-            # Mock clear_collection_data calls - all succeed
-            clear_calls = [Exception("Not found")] * 6  # Expected calls for clearing
-            # Mock get_last_update_id and create_job - create_job fails
-            job_calls = [
+            # Mock clear_collection_data calls - all fail (not found)
+            # 9 keys: last_update + 8 type-specific
+            mock_api_harness.DeleteObject.side_effect = [Exception("Not found")] * 9
+            # Mock get_last_update_id - GetObject raises exception
+            mock_api_harness.GetObject.side_effect = [
                 Exception("Object not found"),  # get_last_update_id
+            ]
+            # Mock create_job - PutObject fails
+            mock_api_harness.PutObject.side_effect = [
                 {"status_code": 500}  # create_job PutObject fails
             ]
-            mock_api_harness.command.side_effect = clear_calls + job_calls
 
             request = Request()
             request.body = {}
