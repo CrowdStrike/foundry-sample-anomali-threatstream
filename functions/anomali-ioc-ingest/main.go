@@ -1305,7 +1305,7 @@ func fetchIOCsFromAnomali(ctx context.Context, falconClient *client.CrowdStrikeA
 					{
 						DefinitionID: &apiIntegrationName,
 						OperationID:  &operationID,
-						Request: &models.DomainRequest{
+						Config: &models.DomainConfigData{
 							Params: &models.DomainParams{
 								Query: queryParams,
 							},
