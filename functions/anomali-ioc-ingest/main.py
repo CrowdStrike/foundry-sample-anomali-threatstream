@@ -54,7 +54,7 @@ from typing import Dict, List, Any, Optional
 from urllib.parse import urlparse, parse_qs
 
 from crowdstrike.foundry.function import Function, Request, Response, APIError
-from falconpy import APIIntegrations, NGSIEM, APIHarnessV2
+from falconpy import APIIntegrations, NGSIEM, CustomStorage
 
 
 FUNC = Function.instance()
@@ -225,7 +225,7 @@ JOB_COMPLETED = "completed"
 JOB_FAILED = "failed"
 
 def get_last_update_id(
-    api_client: APIHarnessV2, headers: Dict[str, str], ioc_type: Optional[str], logger: Logger
+    custom_storage: CustomStorage, ioc_type: Optional[str], logger: Logger
 ) -> Optional[Dict]:
     """Get the last update_id from collections for incremental sync"""
     # Use simple per-type key: last_update_ip, last_update_domain, etc.
@@ -238,10 +238,9 @@ def get_last_update_id(
 
     # Try to get the object directly
     try:
-        response = api_client.command("GetObject",
+        response = custom_storage.GetObject(
                                     collection_name=COLLECTION_UPDATE_TRACKER,
-                                    object_key=object_key,
-                                    headers=headers)
+                                    object_key=object_key)
 
         # GetObject returns bytes directly, need to decode
         update_data = json.loads(response.decode("utf-8"))
@@ -259,8 +258,7 @@ def get_last_update_id(
         return None
 
 def save_update_id(
-    api_client: APIHarnessV2,
-    headers: Dict[str, str],
+    custom_storage: CustomStorage,
     update_data: Dict,
     ioc_type: Optional[str],
     logger: Logger
@@ -275,11 +273,10 @@ def save_update_id(
 
         logger.info(f"Saving update_id to collections with key {object_key}: {update_data}")
 
-        response = api_client.command("PutObject",
+        response = custom_storage.PutObject(
                                     body=update_data,
                                     collection_name=COLLECTION_UPDATE_TRACKER,
-                                    object_key=object_key,
-                                    headers=headers)
+                                    object_key=object_key)
 
         if response["status_code"] != 200:
             raise CollectionError(f"Failed to save update_id: {response}")
@@ -294,8 +291,7 @@ def save_update_id(
         raise
 
 def create_job(
-    api_client: APIHarnessV2,
-    headers: Dict[str, str],
+    custom_storage: CustomStorage,
     last_update: Optional[Dict],
     ioc_type: Optional[str],
     logger: Logger
@@ -371,11 +367,10 @@ def create_job(
     try:
         logger.info(f"Creating job: {job}")
 
-        response = api_client.command("PutObject",
+        response = custom_storage.PutObject(
                                     body=job,
                                     collection_name=COLLECTION_INGEST_JOBS,
-                                    object_key=job_id,
-                                    headers=headers)
+                                    object_key=job_id)
 
         if response["status_code"] != 200:
             raise JobError(f"Failed to create job: {response}")
@@ -387,7 +382,7 @@ def create_job(
         logger.error(f"Error creating job: {str(e)}", exc_info=True)
         raise
 
-def update_job(api_client: APIHarnessV2, headers: Dict[str, str], job: Dict, logger: Logger):
+def update_job(custom_storage: CustomStorage, job: Dict, logger: Logger):
     """Update job status in collections or log in test mode"""
     # Check if we're in test mode
     test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
@@ -400,11 +395,10 @@ def update_job(api_client: APIHarnessV2, headers: Dict[str, str], job: Dict, log
     try:
         logger.info(f"Updating job {job["id"]} with state: {job["state"]}")
 
-        response = api_client.command("PutObject",
+        response = custom_storage.PutObject(
                                     body=job,
                                     collection_name=COLLECTION_INGEST_JOBS,
-                                    object_key=job["id"],
-                                    headers=headers)
+                                    object_key=job["id"])
 
         if response["status_code"] != 200:
             raise JobError(f"Failed to update job: {response}")
@@ -794,7 +788,7 @@ def download_existing_lookup_files_from_ngsiem(
     return existing_files
 
 def clear_collection_data(
-    api_client: APIHarnessV2, headers: Dict[str, str], logger: Logger
+    custom_storage: CustomStorage, logger: Logger
 ):
     """Clear collection data when starting from scratch"""
     try:
@@ -808,40 +802,27 @@ def clear_collection_data(
 
         for key in update_keys:
             try:
-                api_client.command("DeleteObject",
+                custom_storage.DeleteObject(
                                  collection_name=COLLECTION_UPDATE_TRACKER,
-                                 object_key=key,
-                                 headers=headers)
+                                 object_key=key)
                 logger.info(f"Cleared update tracker data for key: {key}")
             except Exception as e:
                 logger.info(f"No update tracker data to clear for key {key}: {str(e)}")
-
-        # Clear job data (optional - jobs are historical records)
-        # We might want to keep job history, so this is commented out
-        # try:
-        #     # List and delete all job objects
-        #     response = api_client.command("SearchObjects",
-        #                                 collection_name=COLLECTION_INGEST_JOBS,
-        #                                 headers=headers)
-        #     # Delete logic would go here if needed
-        # except Exception as e:
-        #     logger.info(f"No job data to clear: {str(e)}")
 
     except Exception as e:
         logger.error(f"Error clearing collection data: {str(e)}")
 
 def clear_update_id_for_type(
-    api_client: APIHarnessV2, headers: Dict[str, str], ioc_type: str, logger: Logger
+    custom_storage: CustomStorage, ioc_type: str, logger: Logger
 ):
     """Clear the update_id for a specific IOC type when its lookup file is missing"""
     try:
         object_key = f"{KEY_LAST_UPDATE}_{ioc_type}"
         logger.info(f"Clearing update_id for type {ioc_type} (key: {object_key})")
 
-        api_client.command("DeleteObject",
+        custom_storage.DeleteObject(
                          collection_name=COLLECTION_UPDATE_TRACKER,
-                         object_key=object_key,
-                         headers=headers)
+                         object_key=object_key)
         logger.info(f"Successfully cleared update_id for type {ioc_type}")
 
     except Exception as e:
@@ -1189,7 +1170,7 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
 
     return results
 
-def build_query_params(next_token, status_filter, type_filter, limit, api_client, headers, logger,
+def build_query_params(next_token, status_filter, type_filter, limit, custom_storage, headers, logger,
                        job=None, request_body=None, trustedcircles=None, feed_id=None,
                        confidence_gt=None, confidence_gte=None, confidence_lt=None, confidence_lte=None):
     """Build query parameters for Anomali API call.
@@ -1199,7 +1180,7 @@ def build_query_params(next_token, status_filter, type_filter, limit, api_client
         status_filter: Status filter
         type_filter: IOC type filter
         limit: Records per page
-        api_client: API client (unused, for compatibility)
+        custom_storage: CustomStorage client (unused, for compatibility)
         headers: Request headers (unused, for compatibility)
         logger: Logger instance
         job: Job record with parameters
@@ -1364,8 +1345,7 @@ def check_and_recover_missing_files(
     repository: str,
     type_filter: Optional[str],
     temp_dir: str,
-    api_client: APIHarnessV2,
-    headers: Dict[str, str],
+    custom_storage: CustomStorage,
     logger: Logger
 ) -> tuple[bool, Dict[str, str]]:
     """Check for existing lookup files and handle missing file recovery.
@@ -1374,8 +1354,7 @@ def check_and_recover_missing_files(
         repository: NGSIEM repository name
         type_filter: Optional IOC type filter
         temp_dir: Temporary directory for streaming file downloads
-        api_client: API client for collections access
-        headers: Request headers
+        custom_storage: CustomStorage client for collections access
         logger: Logger instance
 
     Returns:
@@ -1398,43 +1377,39 @@ def check_and_recover_missing_files(
                 "continuing incremental sync"
             )
 
-            # Check for missing specific type files and clear their update_ids
-            # Build expected files list dynamically from IOC_TYPE_MAPPINGS
-            expected_files = [
-                f"anomali_threatstream_{ioc_type}.csv" for ioc_type in IOC_TYPE_MAPPINGS
-            ]
+            # Only consider a file "missing" if it was previously tracked
+            # (has a per-type update_id in the tracker collection). IOC types
+            # that never appeared in the feed are not "missing".
+            previously_tracked_missing = []
+            for ioc_type_key in IOC_TYPE_MAPPINGS:
+                filename = f"anomali_threatstream_{ioc_type_key}.csv"
+                if filename in existing_files:
+                    continue  # File exists, nothing to recover
 
-            missing_files = [f for f in expected_files if f not in existing_files]
-            if missing_files:
-                logger.info(
-                    f"Detected missing files: {missing_files} - "
-                    "clearing update_ids for these types"
-                )
+                # Check if this type was previously tracked
+                if ioc_type_key.startswith("hash_"):
+                    tracker_key = "hash"
+                else:
+                    tracker_key = ioc_type_key
 
-                for missing_file in missing_files:
-                    # Extract type from filename (remove prefix and suffix)
-                    filename_base = missing_file.replace(
-                        "anomali_threatstream_", ""
-                    ).replace(".csv", "")
-
-                    # Map filename back to collection key
-                    if filename_base.startswith("hash_"):
-                        collection_type = "hash"  # All hash types use the same collection key
-                    else:
-                        collection_type = filename_base
-
-                    clear_update_id_for_type(api_client, headers, collection_type, logger)
-
-                # Also clear the main last_update key
-                logger.info("Clearing main last_update key to ensure fresh start for missing file types")
                 try:
-                    api_client.command("DeleteObject",
-                                     collection_name=COLLECTION_UPDATE_TRACKER,
-                                     object_key=KEY_LAST_UPDATE,
-                                     headers=headers)
-                    logger.info("Successfully cleared main last_update key")
-                except Exception as e:
-                    logger.info(f"Main last_update key was already cleared or didn't exist: {str(e)}")
+                    custom_storage.GetObject(
+                        collection_name=COLLECTION_UPDATE_TRACKER,
+                        object_key=f"{KEY_LAST_UPDATE}_{tracker_key}")
+                    # Tracker exists but file is gone — this type needs recovery
+                    previously_tracked_missing.append((filename, tracker_key))
+                except Exception:
+                    # No tracker entry — this type never had data, not "missing"
+                    pass
+
+            if previously_tracked_missing:
+                missing_names = [f for f, _ in previously_tracked_missing]
+                logger.info(
+                    f"Detected previously tracked files that are now missing: "
+                    f"{missing_names} - clearing their update_ids"
+                )
+                for _, tracker_key in previously_tracked_missing:
+                    clear_update_id_for_type(custom_storage, tracker_key, logger)
     else:
         # Type filter specified - always download existing files for that type
         logger.info(f"Checking for existing files for type: {type_filter}")
@@ -1528,14 +1503,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
         # Initialize clients
         api_integrations = APIIntegrations()
-        api_client = APIHarnessV2()
-
-        # Set up headers for collections
-        # Note: X-CS-APP-ID is needed for local development when accessing collections
-        # In production, Foundry automatically sets this header
+        # Use CustomStorage service class for collections — ext_headers bakes in
+        # X-CS-APP-ID for local development; in production Foundry sets it automatically
         headers = {}
         if os.environ.get("APP_ID"):
             headers = {"X-CS-APP-ID": os.environ.get("APP_ID")}
+        custom_storage = CustomStorage(ext_headers=headers)
 
         # Create temp_dir early for disk-based streaming (O(1) memory)
         # This is used for downloading existing files and creating new CSV files
@@ -1547,7 +1520,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             # Check for existing files and handle missing file recovery
             # Files are streamed directly to temp_dir (not held in memory)
             should_start_fresh, existing_files = check_and_recover_missing_files(
-                repository, type_filter, temp_dir, api_client, headers, logger
+                repository, type_filter, temp_dir, custom_storage, logger
             )
 
             phase1_elapsed = time.time() - phase1_start
@@ -1558,7 +1531,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
             if should_start_fresh:
                 logger.info("Starting completely fresh sync - clearing all collection data")
-                clear_collection_data(api_client, headers, logger)
+                clear_collection_data(custom_storage, logger)
 
             # For pagination calls, skip job creation and use workflow parameters
             if next_token:
@@ -1569,17 +1542,17 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 logger.info("Initial call - creating type-specific job")
 
                 # Get type-specific update_id
-                last_update = get_last_update_id(api_client, headers, type_filter, logger)
+                last_update = get_last_update_id(custom_storage, type_filter, logger)
 
                 # Create type-specific job
-                job = create_job(api_client, headers, last_update, type_filter, logger)
+                job = create_job(custom_storage, last_update, type_filter, logger)
 
             try:
                 # Build query parameters using extracted helper function
                 logger.info(f"Building query params: next_token='{next_token}', bool={bool(next_token)}")
 
                 query_params = build_query_params(
-                    next_token, status_filter, type_filter, limit, api_client, headers, logger, job,
+                    next_token, status_filter, type_filter, limit, custom_storage, headers, logger, job,
                     request_body=request.body, trustedcircles=trustedcircles, feed_id=feed_id,
                     confidence_gt=confidence_gt, confidence_gte=confidence_gte,
                     confidence_lt=confidence_lt, confidence_lte=confidence_lte
@@ -1599,7 +1572,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     # Mark job as completed even with no data (if job exists)
                     if job:
                         job["state"] = JOB_COMPLETED
-                        update_job(api_client, headers, job, logger)
+                        update_job(custom_storage, job, logger)
 
                     return Response(
                         body={
@@ -1626,7 +1599,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     # Mark job as completed but no valid data (if job exists)
                     if job:
                         job["state"] = JOB_COMPLETED
-                        update_job(api_client, headers, job, logger)
+                        update_job(custom_storage, job, logger)
 
                     return Response(
                         body={
@@ -1675,12 +1648,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     }
 
                     # Save state for the appropriate type (single type or all types)
-                    save_update_id(api_client, headers, update_data, type_filter, logger)
+                    save_update_id(custom_storage, update_data, type_filter, logger)
 
                 # Mark job as completed (if job exists)
                 if job:
                     job["state"] = JOB_COMPLETED
-                    update_job(api_client, headers, job, logger)
+                    update_job(custom_storage, job, logger)
 
                 # Prepare response with consistent next field
                 response_body = {
@@ -1715,7 +1688,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 if job:
                     job["state"] = JOB_FAILED
                     job["error"] = str(e)
-                    update_job(api_client, headers, job, logger)
+                    update_job(custom_storage, job, logger)
                 raise
 
     except Exception as e:
