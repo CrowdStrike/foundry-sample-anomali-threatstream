@@ -411,6 +411,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",
                 "confidence": 90,
                 "threat_type": "malware",
+                "severity": "high",
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -452,6 +453,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",
                 "confidence": 90,
                 "threat_type": "malware",
+                "severity": "high",
                 "source": "test",
                 "tags": [{"name": "botnet"}, {"name": "c2"}],
                 "expiration_ts": "2024-12-31T23:59:59Z"
@@ -488,6 +490,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "value": "evil.com",
                 "confidence": 85,
                 "threat_type": "phishing",
+                "severity": "medium",
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -629,6 +632,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                         "ip": "1.2.3.4",
                         "confidence": 90,
                         "threat_type": "malware",
+                        "severity": "high",
                         "source": "test",
                         "tags": [],
                         "expiration_ts": "",
@@ -811,6 +815,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                             "ip": "1.2.3.4",
                             "confidence": 90,
                             "threat_type": "malware",
+                            "severity": "high",
                             "source": "test",
                             "tags": [],
                             "expiration_ts": "",
@@ -956,6 +961,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",  # Duplicate IP
                 "confidence": 90,
                 "threat_type": "malware",
+                "severity": "high",
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -965,6 +971,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "5.6.7.8",  # New IP
                 "confidence": 85,
                 "threat_type": "botnet",
+                "severity": "medium",
                 "source": "test2",
                 "tags": [],
                 "expiration_ts": ""
@@ -974,8 +981,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # Existing file with one IP already
         existing_files = {
             "anomali_threatstream_ip.csv":
-                "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
-                "1.2.3.4,95,existing,original,tag1,2024-12-31T23:59:59Z\n"
+                "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
+                "1.2.3.4,95,existing,,original,tag1,2024-12-31T23:59:59Z\n"
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1086,9 +1093,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         for _, mapping in main.IOC_TYPE_MAPPINGS.items():
             self.assertIn('columns', mapping)
             self.assertIn('primary_field', mapping)
-            self.assertEqual(len(mapping['columns']), 6)  # Should have 6 columns
+            self.assertEqual(len(mapping['columns']), 7)  # Should have 7 columns
             self.assertIn('confidence', mapping['columns'])
             self.assertIn('threat_type', mapping['columns'])
+            self.assertIn('severity', mapping['columns'])
             self.assertIn('source', mapping['columns'])
             self.assertIn('tags', mapping['columns'])
             self.assertIn('expiration_ts', mapping['columns'])
@@ -1458,6 +1466,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",
                 "confidence": 90,
                 "threat_type": "malware",
+                "severity": "high",
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -1813,12 +1822,12 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
             # Create some test lookup files
             ip_csv = (
-                "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
-                "1.2.3.4,90,malware,test,tag1,2024-12-31T23:59:59Z\n"
+                "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
+                "1.2.3.4,90,malware,high,test,tag1,2024-12-31T23:59:59Z\n"
             )
             domain_csv = (
-                "dns.domain.name,confidence,threat_type,source,tags,expiration_ts\n"
-                "evil.com,85,phishing,test,tag2,2024-12-31T23:59:59Z\n"
+                "dns.domain.name,confidence,threat_type,severity,source,tags,expiration_ts\n"
+                "evil.com,85,phishing,medium,test,tag2,2024-12-31T23:59:59Z\n"
             )
             test_files = {
                 "anomali_threatstream_ip.csv": ip_csv,
@@ -1885,8 +1894,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             # Create a test CSV file
             test_csv_path = os.path.join(temp_dir, "test_file.csv")
             test_csv_content = (
-                "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
-                "1.2.3.4,90,malware,test,tag1,2024-12-31T23:59:59Z\n"
+                "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
+                "1.2.3.4,90,malware,high,test,tag1,2024-12-31T23:59:59Z\n"
             )
 
             with open(test_csv_path, 'w', encoding='utf-8') as f:
@@ -1993,8 +2002,8 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
             test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
 
             # Write a small CSV with header + 10 rows (~500 bytes)
-            rows = [f"192.168.1.{i},85,malware,test,tag1,2026-12-31" for i in range(10)]
-            content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+            rows = [f"192.168.1.{i},85,malware,high,test,tag1,2026-12-31" for i in range(10)]
+            content = "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
             content += "\n".join(rows) + "\n"
 
             with open(test_file, 'w', encoding='utf-8') as f:
@@ -2013,8 +2022,8 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
             test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
 
             # Write a CSV with header + 100 rows (~5KB)
-            rows = [f"192.168.1.{i},85,malware,test,tag1,2026-12-31" for i in range(100)]
-            content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+            rows = [f"192.168.1.{i},85,malware,high,test,tag1,2026-12-31" for i in range(100)]
+            content = "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
             content += "\n".join(rows) + "\n"
 
             with open(test_file, 'w', encoding='utf-8') as f:
@@ -2051,7 +2060,7 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
             test_file = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
 
             # Write a CSV with only header (no data rows)
-            content = "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+            content = "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
 
             with open(test_file, 'w', encoding='utf-8') as f:
                 f.write(content)
