@@ -68,31 +68,31 @@ type IOCTypeMapping struct {
 // IOC type mappings for CSV column headers
 var iocTypeMappings = map[string]IOCTypeMapping{
 	"ip": {
-		Columns:      []string{"destination.ip", "confidence", "threat_type", "source", "tags", "expiration_ts"},
+		Columns:      []string{"destination.ip", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"},
 		PrimaryField: "ip",
 	},
 	"domain": {
-		Columns:      []string{"dns.domain.name", "confidence", "threat_type", "source", "tags", "expiration_ts"},
+		Columns:      []string{"dns.domain.name", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"},
 		PrimaryField: "value",
 	},
 	"url": {
-		Columns:      []string{"url.original", "confidence", "threat_type", "source", "tags", "expiration_ts"},
+		Columns:      []string{"url.original", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"},
 		PrimaryField: "value",
 	},
 	"email": {
-		Columns:      []string{"email.sender.address", "confidence", "threat_type", "source", "tags", "expiration_ts"},
+		Columns:      []string{"email.sender.address", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"},
 		PrimaryField: "value",
 	},
 	"hash_md5": {
-		Columns:      []string{"file.hash.md5", "confidence", "threat_type", "source", "tags", "expiration_ts"},
+		Columns:      []string{"file.hash.md5", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"},
 		PrimaryField: "value",
 	},
 	"hash_sha1": {
-		Columns:      []string{"file.hash.sha1", "confidence", "threat_type", "source", "tags", "expiration_ts"},
+		Columns:      []string{"file.hash.sha1", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"},
 		PrimaryField: "value",
 	},
 	"hash_sha256": {
-		Columns:      []string{"file.hash.sha256", "confidence", "threat_type", "source", "tags", "expiration_ts"},
+		Columns:      []string{"file.hash.sha256", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"},
 		PrimaryField: "value",
 	},
 }
@@ -135,6 +135,7 @@ type IOC struct {
 	Value        string              `json:"value"`
 	Confidence   interface{}         `json:"confidence"`
 	ThreatType   string              `json:"threat_type"`
+	Severity     string              `json:"severity"`
 	Source       string              `json:"source"`
 	Tags         []map[string]string `json:"tags"`
 	ExpirationTs string              `json:"expiration_ts"`
@@ -1657,6 +1658,7 @@ func processIOCsToCSV(iocs []IOC, tempDir string, existingFilePaths map[string]s
 				primaryValue,
 				toString(ioc.Confidence),
 				ioc.ThreatType,
+				ioc.Severity,
 				ioc.Source,
 				tags,
 				ioc.ExpirationTs,
