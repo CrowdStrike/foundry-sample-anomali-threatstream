@@ -172,43 +172,50 @@ def estimate_final_file_sizes(
 IOC_TYPE_MAPPINGS = {
     "ip": {
         "columns": [
-            "destination.ip", "confidence", "threat_type", "source", "tags", "expiration_ts"
+            "destination.ip", "confidence", "threat_type", "severity", "source", "tags",
+            "expiration_ts"
         ],
         "primary_field": "ip"
     },
     "domain": {
         "columns": [
-            "dns.domain.name", "confidence", "threat_type", "source", "tags", "expiration_ts"
+            "dns.domain.name", "confidence", "threat_type", "severity", "source", "tags",
+            "expiration_ts"
         ],
         "primary_field": "value"
     },
     "url": {
         "columns": [
-            "url.original", "confidence", "threat_type", "source", "tags", "expiration_ts"
+            "url.original", "confidence", "threat_type", "severity", "source", "tags",
+            "expiration_ts"
         ],
         "primary_field": "value"
     },
     "email": {
         "columns": [
-            "email.sender.address", "confidence", "threat_type", "source", "tags", "expiration_ts"
+            "email.sender.address", "confidence", "threat_type", "severity", "source", "tags",
+            "expiration_ts"
         ],
         "primary_field": "value"
     },
     "hash_md5": {
         "columns": [
-            "file.hash.md5", "confidence", "threat_type", "source", "tags", "expiration_ts"
+            "file.hash.md5", "confidence", "threat_type", "severity", "source", "tags",
+            "expiration_ts"
         ],
         "primary_field": "value"
     },
     "hash_sha1": {
         "columns": [
-            "file.hash.sha1", "confidence", "threat_type", "source", "tags", "expiration_ts"
+            "file.hash.sha1", "confidence", "threat_type", "severity", "source", "tags",
+            "expiration_ts"
         ],
         "primary_field": "value"
     },
     "hash_sha256": {
         "columns": [
-            "file.hash.sha256", "confidence", "threat_type", "source", "tags", "expiration_ts"
+            "file.hash.sha256", "confidence", "threat_type", "severity", "source", "tags",
+            "expiration_ts"
         ],
         "primary_field": "value"
     }
@@ -946,6 +953,7 @@ def process_iocs_to_csv(
                     primary_value,
                     str(ioc.get("confidence", '')),
                     str(ioc.get("threat_type", '')),
+                    str(ioc.get("severity", '')),
                     str(ioc.get("source", '')),
                     tags_str,
                     str(ioc.get("expiration_ts", ''))

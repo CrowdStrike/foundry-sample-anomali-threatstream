@@ -249,9 +249,9 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Existing data with an IP that will be updated
-	existingCSV := `destination.ip,confidence,threat_type,source,tags,expiration_ts
-1.2.3.4,50,suspicious,old_source,old_tag,2024-01-01
-5.6.7.8,70,malware,existing,tag1,2024-06-01
+	existingCSV := `destination.ip,confidence,threat_type,severity,source,tags,expiration_ts
+1.2.3.4,50,suspicious,,old_source,old_tag,2024-01-01
+5.6.7.8,70,malware,,existing,tag1,2024-06-01
 `
 
 	// Write existing data to a temp file (simulating downloaded existing file)
@@ -547,8 +547,8 @@ func TestIOCTypeMappings(t *testing.T) {
 			continue
 		}
 
-		if len(mapping.Columns) != 6 {
-			t.Errorf("IOC type %s should have 6 columns, got %d", iocType, len(mapping.Columns))
+		if len(mapping.Columns) != 7 {
+			t.Errorf("IOC type %s should have 7 columns, got %d", iocType, len(mapping.Columns))
 		}
 
 		if mapping.PrimaryField == "" {
@@ -556,7 +556,7 @@ func TestIOCTypeMappings(t *testing.T) {
 		}
 
 		// Verify expected columns exist
-		expectedCols := []string{"confidence", "threat_type", "source", "tags", "expiration_ts"}
+		expectedCols := []string{"confidence", "threat_type", "severity", "source", "tags", "expiration_ts"}
 		for _, col := range expectedCols {
 			found := false
 			for _, c := range mapping.Columns {
@@ -2686,9 +2686,9 @@ func TestEstimateFinalFileSizes(t *testing.T) {
 		testFile := filepath.Join(tempDir, "anomali_threatstream_ip.csv")
 
 		// Write a small CSV with header + 10 rows (~500 bytes)
-		content := "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+		content := "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
 		for i := 0; i < 10; i++ {
-			content += fmt.Sprintf("192.168.1.%d,85,malware,test,tag1,2026-12-31\n", i)
+			content += fmt.Sprintf("192.168.1.%d,85,malware,high,test,tag1,2026-12-31\n", i)
 		}
 		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
 			t.Fatalf("Failed to create test file: %v", err)
@@ -2707,9 +2707,9 @@ func TestEstimateFinalFileSizes(t *testing.T) {
 		testFile := filepath.Join(tempDir, "anomali_threatstream_ip.csv")
 
 		// Write a CSV with header + 100 rows (~5KB)
-		content := "destination.ip,confidence,threat_type,source,tags,expiration_ts\n"
+		content := "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
 		for i := 0; i < 100; i++ {
-			content += fmt.Sprintf("192.168.1.%d,85,malware,test,tag1,2026-12-31\n", i)
+			content += fmt.Sprintf("192.168.1.%d,85,malware,high,test,tag1,2026-12-31\n", i)
 		}
 		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
 			t.Fatalf("Failed to create test file: %v", err)
