@@ -223,11 +223,11 @@ loops:
 **IOC Types**: IP addresses, domains, URLs, email addresses, MD5/SHA1/SHA256 hashes
 
 **ECS-Compliant Fields**: 
-- IPs: `destination.ip`, confidence, threat_type, source, tags, expiration_ts
-- Domains: `dns.domain.name`, confidence, threat_type, source, tags, expiration_ts
-- URLs: `url.original`, confidence, threat_type, source, tags, expiration_ts
-- Emails: `email.sender.address`, confidence, threat_type, source, tags, expiration_ts
-- Hashes: `file.hash.md5/sha1/sha256`, confidence, threat_type, source, tags, expiration_ts
+- IPs: `destination.ip`, confidence, threat_type, severity, source, tags, expiration_ts
+- Domains: `dns.domain.name`, confidence, threat_type, severity, source, tags, expiration_ts
+- URLs: `url.original`, confidence, threat_type, severity, source, tags, expiration_ts
+- Emails: `email.sender.address`, confidence, threat_type, severity, source, tags, expiration_ts
+- Hashes: `file.hash.md5/sha1/sha256`, confidence, threat_type, severity, source, tags, expiration_ts
 
 **Output Format**: CSV lookup files uploaded to Falcon Next-Gen SIEM repository for joining with host data
 
@@ -247,17 +247,17 @@ loops:
 // Test IP lookup file 
 | createEvents(["{\"fake\":\"event\", \"destination.ip\": \"23.98.23.98\"}"]) | parseJson()
 | destination.ip=*
-| match(file="anomali_threatstream_ip.csv", column=destination.ip, field=destination.ip, strict=true, include=[confidence, threat_type, source])
+| match(file="anomali_threatstream_ip.csv", column=destination.ip, field=destination.ip, strict=true, include=[confidence, threat_type, severity, source])
 
 // Test domain lookup file
 | createEvents(["{\"fake\":\"event\", \"DomainName\": \"gen1xyz.com\"}"]) | parseJson()
 | DomainName=*
-| match(file="anomali_threatstream_domain.csv", field=[DomainName], column=dns.domain.name, strict=true, include=[confidence, threat_type, source])
+| match(file="anomali_threatstream_domain.csv", field=[DomainName], column=dns.domain.name, strict=true, include=[confidence, threat_type, severity, source])
 
 // Test email lookup file
 | createEvents(["{\"fake\":\"event\", \"SenderAddress\": \"rfv4@edc.com\"}"]) | parseJson()
 | SenderAddress=*
-| match(file="anomali_threatstream_email.csv", field=[SenderAddress], column=email.sender.address, strict=true, include=[confidence, threat_type, source])
+| match(file="anomali_threatstream_email.csv", field=[SenderAddress], column=email.sender.address, strict=true, include=[confidence, threat_type, severity, source])
 ```
 
 **Job Status**: Function includes `/jobs` endpoint to check ingestion job status and collections track incremental sync progress.
@@ -270,22 +270,22 @@ loops:
 // Detect malicious IP connections using lookup files
 #event_simpleName=NetworkConnectIP4
 | match(file="anomali_threatstream_ip.csv", field=[RemoteAddressIP4], column=[destination.ip])
-| table([ComputerName, UserName, RemoteAddressIP4, threat_type, confidence, source])
+| table([ComputerName, UserName, RemoteAddressIP4, threat_type, severity, confidence, source])
 
 // Detect malicious domain lookups using lookup files
 #event_simpleName=DnsRequest
 | match(file="anomali_threatstream_domain.csv", field=[DomainName], column=[dns.domain.name])
-| table([ComputerName, UserName, DomainName, threat_type, confidence, source])
+| table([ComputerName, UserName, DomainName, threat_type, severity, confidence, source])
 
 // Detect malicious file hashes using lookup files
 #event_simpleName=ProcessRollup2
 | match(file="anomali_threatstream_hash_md5.csv", field=[MD5HashData], column=[file.hash.md5])
-| table([ComputerName, UserName, FileName, MD5HashData, threat_type, confidence, source])
+| table([ComputerName, UserName, FileName, MD5HashData, threat_type, severity, confidence, source])
 
 // Detect malicious email addresses using lookup files
 #event_simpleName=EmailMessage OR #event_simpleName=EmailDelivery
 | match(file="anomali_threatstream_email.csv", field=[SenderAddress], column=[email.sender.address])
-| table([ComputerName, UserName, SenderAddress, threat_type, confidence, source])
+| table([ComputerName, UserName, SenderAddress, threat_type, severity, confidence, source])
 
 // Combined threat hunting across multiple IOC types
 #event_simpleName=NetworkConnectIP4 OR #event_simpleName=DnsRequest OR #event_simpleName=ProcessRollup2
