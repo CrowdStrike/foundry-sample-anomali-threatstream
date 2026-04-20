@@ -1637,6 +1637,47 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertNotIn("confidence__lt", result)
         self.assertNotIn("confidence__lte", result)
 
+    def test_build_query_params_with_severity_filter(self):
+        """Test build_query_params with severity filtering parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "update_id__gt": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            severity="high"
+        )
+
+        self.assertEqual(result["severity"], "high")
+
+    def test_build_query_params_no_severity_filter(self):
+        """Test build_query_params without severity filter (default behavior)."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "update_id__gt": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job
+        )
+
+        self.assertNotIn("severity", result)
+
     def test_download_existing_lookup_files_unexpected_response(self):
         """Test download_existing_lookup_files with unexpected response types."""
         mock_logger = MagicMock()

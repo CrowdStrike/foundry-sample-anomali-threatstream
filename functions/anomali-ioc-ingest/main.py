@@ -1180,7 +1180,8 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
 
 def build_query_params(next_token, status_filter, type_filter, limit, custom_storage, headers, logger,
                        job=None, request_body=None, trustedcircles=None, feed_id=None,
-                       confidence_gt=None, confidence_gte=None, confidence_lt=None, confidence_lte=None):
+                       confidence_gt=None, confidence_gte=None, confidence_lt=None, confidence_lte=None,
+                       severity=None):
     """Build query parameters for Anomali API call.
 
     Args:
@@ -1199,6 +1200,7 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
         confidence_gte: Filter by confidence score greater than or equal to
         confidence_lt: Filter by confidence score less than
         confidence_lte: Filter by confidence score less than or equal to
+        severity: Filter by severity (assigned by Anomali machine-learning algorithms)
     """
     # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument,too-many-locals,too-many-statements
     if next_token:
@@ -1296,6 +1298,11 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
     if confidence_lte is not None:
         logger.info(f"Filtering by confidence__lte: {confidence_lte}")
         query_params["confidence__lte"] = confidence_lte
+
+    # Add severity filtering if provided (works for both initial and pagination)
+    if severity is not None:
+        logger.info(f"Filtering by severity: {severity}")
+        query_params["severity"] = severity
 
     return query_params
 
@@ -1487,6 +1494,9 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         confidence_lt = request.body.get("confidence_lt", None)
         confidence_lte = request.body.get("confidence_lte", None)
 
+        # Parse severity filter
+        severity = request.body.get("severity", None)
+
         # Parse fail-fast setting (disabled by default for testing)
         fail_fast_enabled = request.body.get("fail_fast_enabled", False)
 
@@ -1506,7 +1516,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         logger.info(
             f"Request parameters: status={status_filter}, type={type_filter}, "
             f"trustedcircles={trustedcircles}, feed_id={feed_id}, next={next_token}, limit={limit}, "
-            f"confidence_gte={confidence_gte}, confidence_gt={confidence_gt}"
+            f"confidence_gte={confidence_gte}, confidence_gt={confidence_gt}, "
+            f"severity={severity}"
         )
 
         # Initialize clients
@@ -1563,7 +1574,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     next_token, status_filter, type_filter, limit, custom_storage, headers, logger, job,
                     request_body=request.body, trustedcircles=trustedcircles, feed_id=feed_id,
                     confidence_gt=confidence_gt, confidence_gte=confidence_gte,
-                    confidence_lt=confidence_lt, confidence_lte=confidence_lte
+                    confidence_lt=confidence_lt, confidence_lte=confidence_lte,
+                    severity=severity
                 )
 
                 logger.info(f"Final query_params before API call: {query_params}")

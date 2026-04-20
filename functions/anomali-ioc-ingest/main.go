@@ -111,6 +111,7 @@ type IngestRequest struct {
 	ConfidenceGte   *int   `json:"confidence_gte"`
 	ConfidenceLt    *int   `json:"confidence_lt"`
 	ConfidenceLte   *int   `json:"confidence_lte"`
+	Severity        string `json:"severity"`
 	Limit           int    `json:"limit"`
 	Next            string `json:"next"`
 	FailFastEnabled bool   `json:"fail_fast_enabled"`
@@ -319,6 +320,7 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"trusted_circles", req.TrustedCircles,
 		"confidence_gte", req.ConfidenceGte,
 		"confidence_gt", req.ConfidenceGt,
+		"severity", req.Severity,
 		"update_id_gt", req.UpdateIDGt,
 		"fail_fast_enabled", req.FailFastEnabled,
 	)
@@ -2412,6 +2414,9 @@ func buildQueryParams(req IngestRequest, job *IngestJob, nextToken string) map[s
 	}
 	if req.ConfidenceLt != nil {
 		queryParams["confidence__lt"] = *req.ConfidenceLt
+	}
+	if req.Severity != "" {
+		queryParams["severity"] = req.Severity
 	}
 
 	return queryParams
