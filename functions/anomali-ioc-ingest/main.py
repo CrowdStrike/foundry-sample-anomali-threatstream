@@ -928,7 +928,7 @@ def process_iocs_to_csv(
                     primary_value,
                     str(ioc.get("confidence", '')),
                     str(ioc.get("threat_type", '')),
-                    str(ioc.get("severity", '')),
+                    str(ioc.get("meta", {}).get("severity", '')),
                     str(ioc.get("source", '')),
                     tags_str,
                     str(ioc.get("expiration_ts", ''))
@@ -1296,7 +1296,7 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
     # Add severity filtering if provided (works for both initial and pagination)
     if severity is not None:
         logger.info(f"Filtering by severity: {severity}")
-        query_params["severity"] = severity
+        query_params["meta.severity"] = severity
 
     return query_params
 

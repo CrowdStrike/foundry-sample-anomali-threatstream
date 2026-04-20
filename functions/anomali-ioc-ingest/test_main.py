@@ -408,7 +408,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",
                 "confidence": 90,
                 "threat_type": "malware",
-                "severity": "high",
+                "meta": {"severity": "high"},
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -450,7 +450,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",
                 "confidence": 90,
                 "threat_type": "malware",
-                "severity": "high",
+                "meta": {"severity": "high"},
                 "source": "test",
                 "tags": [{"name": "botnet"}, {"name": "c2"}],
                 "expiration_ts": "2024-12-31T23:59:59Z"
@@ -487,7 +487,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "value": "evil.com",
                 "confidence": 85,
                 "threat_type": "phishing",
-                "severity": "medium",
+                "meta": {"severity": "medium"},
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -624,7 +624,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                         "ip": "1.2.3.4",
                         "confidence": 90,
                         "threat_type": "malware",
-                        "severity": "high",
+                        "meta": {"severity": "high"},
                         "source": "test",
                         "tags": [],
                         "expiration_ts": "",
@@ -806,7 +806,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                             "ip": "1.2.3.4",
                             "confidence": 90,
                             "threat_type": "malware",
-                            "severity": "high",
+                            "meta": {"severity": "high"},
                             "source": "test",
                             "tags": [],
                             "expiration_ts": "",
@@ -952,7 +952,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",  # Duplicate IP
                 "confidence": 90,
                 "threat_type": "malware",
-                "severity": "high",
+                "meta": {"severity": "high"},
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -962,7 +962,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "5.6.7.8",  # New IP
                 "confidence": 85,
                 "threat_type": "botnet",
-                "severity": "medium",
+                "meta": {"severity": "medium"},
                 "source": "test2",
                 "tags": [],
                 "expiration_ts": ""
@@ -1461,7 +1461,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 "ip": "1.2.3.4",
                 "confidence": 90,
                 "threat_type": "malware",
-                "severity": "high",
+                "meta": {"severity": "high"},
                 "source": "test",
                 "tags": [],
                 "expiration_ts": ""
@@ -1656,7 +1656,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             severity="high"
         )
 
-        self.assertEqual(result["severity"], "high")
+        self.assertEqual(result["meta.severity"], "high")
 
     def test_build_query_params_no_severity_filter(self):
         """Test build_query_params without severity filter (default behavior)."""
