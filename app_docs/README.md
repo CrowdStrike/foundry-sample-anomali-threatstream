@@ -39,6 +39,7 @@ Provides automated threat intelligence ingestion from Anomali ThreatStream APIs 
 - `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100)
 - `confidence_lt`: Filter IOCs with confidence score less than specified value (0-100)
 - `confidence_lte`: Filter IOCs with confidence score less than or equal to specified value (0-100)
+- `severity`: Filter IOCs by severity level assigned by Anomali machine-learning algorithms
 - `fail_fast_enabled`: Enable early file size estimation to fail fast if projected size exceeds 200 MB limit (default: false)
 
 ### Filtering by Feed ID
@@ -167,6 +168,71 @@ actions:
 After editing the YAML, redeploy the app using `foundry apps deploy`.
 
 **Understanding Confidence Scores**: Anomali ThreatStream assigns confidence scores based on multiple factors including source reliability, corroboration from multiple feeds, and historical accuracy. A score of 70+ generally indicates high-confidence threat intelligence suitable for automated blocking, while scores below 50 may require additional investigation before taking action.
+
+### Filtering by Severity
+
+To ingest only IOCs that match a specific severity level, you can configure the `severity` parameter in the workflow. Severity in Anomali ThreatStream is assigned to indicators through machine-learning algorithms.
+
+#### Option 1: Edit Workflow via Foundry UI (Recommended)
+
+1. **Navigate to App Manager**: Go to **Foundry > App manager**
+2. **Open App Builder**: Find your app, click the three-dot menu, and select **Edit app**
+3. **Access Logic Section**: In the left sidebar, click the **Logic** icon (lightbulb)
+4. **Edit Workflow**: Click on **Anomali Threat Intelligence Ingest** workflow
+5. **Configure First Action**:
+   - Click on the **Anomali Ingest** action card
+   - Add a `severity` field with the desired severity level (e.g., `severity: high`)
+6. **Configure Loop Action**:
+   - Click on the **Anomali Ingest - 2** action card
+   - Add the same `severity` value
+   - Ensure this matches the first action for consistent filtering
+7. **Save Changes**: Click **Save and exit** in the top right
+
+**Important**: Both `Anomali Ingest` and `Anomali Ingest - 2` actions must use the same `severity` value to ensure consistent filtering throughout pagination.
+
+#### Option 2: Edit Workflow YAML Directly
+
+Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
+
+```yaml
+actions:
+    AnomaliIngest:
+        properties:
+            severity: high  # Filter by severity level
+            limit: 1000
+            repository: search-all
+            status: active
+```
+
+Also update the loop action with the same severity filter:
+
+```yaml
+loops:
+    Loop:
+        actions:
+            AnomaliIngest2:
+                properties:
+                    severity: high  # Must match AnomaliIngest severity
+                    limit: 1000
+                    next: ${data['WorkflowCustomVariable.next']}
+                    repository: search-all
+                    status: active
+```
+
+After editing the YAML, redeploy the app using `foundry apps deploy`.
+
+You can combine severity with other filters like confidence for more precise filtering:
+
+```yaml
+actions:
+    AnomaliIngest:
+        properties:
+            severity: high
+            confidence_gte: 70
+            limit: 1000
+            repository: search-all
+            status: active
+```
 
 ### Fail-Fast File Size Estimation
 

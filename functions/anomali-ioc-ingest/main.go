@@ -111,6 +111,7 @@ type IngestRequest struct {
 	ConfidenceGte   *int   `json:"confidence_gte"`
 	ConfidenceLt    *int   `json:"confidence_lt"`
 	ConfidenceLte   *int   `json:"confidence_lte"`
+	Severity        string `json:"severity"`
 	Limit           int    `json:"limit"`
 	Next            string `json:"next"`
 	FailFastEnabled bool   `json:"fail_fast_enabled"`
@@ -128,6 +129,11 @@ type IngestResponse struct {
 	ProcessStats  map[string]interface{}   `json:"process_stats,omitempty"`
 }
 
+// IOCMeta represents the meta object nested within an IOC response
+type IOCMeta struct {
+	Severity string `json:"severity"`
+}
+
 // IOC represents a single indicator of compromise from Anomali
 type IOC struct {
 	IType        string              `json:"itype"`
@@ -135,7 +141,7 @@ type IOC struct {
 	Value        string              `json:"value"`
 	Confidence   interface{}         `json:"confidence"`
 	ThreatType   string              `json:"threat_type"`
-	Severity     string              `json:"severity"`
+	Meta         IOCMeta             `json:"meta"`
 	Source       string              `json:"source"`
 	Tags         []map[string]string `json:"tags"`
 	ExpirationTs string              `json:"expiration_ts"`
@@ -319,6 +325,7 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"trusted_circles", req.TrustedCircles,
 		"confidence_gte", req.ConfidenceGte,
 		"confidence_gt", req.ConfidenceGt,
+		"severity", req.Severity,
 		"update_id_gt", req.UpdateIDGt,
 		"fail_fast_enabled", req.FailFastEnabled,
 	)
@@ -1658,7 +1665,7 @@ func processIOCsToCSV(iocs []IOC, tempDir string, existingFilePaths map[string]s
 				primaryValue,
 				toString(ioc.Confidence),
 				ioc.ThreatType,
-				ioc.Severity,
+				ioc.Meta.Severity,
 				ioc.Source,
 				tags,
 				ioc.ExpirationTs,
@@ -2412,6 +2419,9 @@ func buildQueryParams(req IngestRequest, job *IngestJob, nextToken string) map[s
 	}
 	if req.ConfidenceLt != nil {
 		queryParams["confidence__lt"] = *req.ConfidenceLt
+	}
+	if req.Severity != "" {
+		queryParams["meta.severity"] = req.Severity
 	}
 
 	return queryParams
