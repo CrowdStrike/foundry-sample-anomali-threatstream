@@ -245,9 +245,8 @@ def get_last_update_id(
 
     # Try to get the object directly
     try:
-        response = custom_storage.GetObject(
-                                    collection_name=COLLECTION_UPDATE_TRACKER,
-                                    object_key=object_key)
+        response = custom_storage.GetObject(collection_name=COLLECTION_UPDATE_TRACKER,
+                                            object_key=object_key)
 
         # GetObject returns bytes directly, need to decode
         update_data = json.loads(response.decode("utf-8"))
@@ -280,10 +279,9 @@ def save_update_id(
 
         logger.info(f"Saving update_id to collections with key {object_key}: {update_data}")
 
-        response = custom_storage.PutObject(
-                                    body=update_data,
-                                    collection_name=COLLECTION_UPDATE_TRACKER,
-                                    object_key=object_key)
+        response = custom_storage.PutObject(body=update_data,
+                                            collection_name=COLLECTION_UPDATE_TRACKER,
+                                            object_key=object_key)
 
         if response["status_code"] != 200:
             raise CollectionError(f"Failed to save update_id: {response}")
@@ -374,10 +372,9 @@ def create_job(
     try:
         logger.info(f"Creating job: {job}")
 
-        response = custom_storage.PutObject(
-                                    body=job,
-                                    collection_name=COLLECTION_INGEST_JOBS,
-                                    object_key=job_id)
+        response = custom_storage.PutObject(body=job,
+                                            collection_name=COLLECTION_INGEST_JOBS,
+                                            object_key=job_id)
 
         if response["status_code"] != 200:
             raise JobError(f"Failed to create job: {response}")
@@ -402,10 +399,9 @@ def update_job(custom_storage: CustomStorage, job: Dict, logger: Logger):
     try:
         logger.info(f"Updating job {job["id"]} with state: {job["state"]}")
 
-        response = custom_storage.PutObject(
-                                    body=job,
-                                    collection_name=COLLECTION_INGEST_JOBS,
-                                    object_key=job["id"])
+        response = custom_storage.PutObject(body=job,
+                                            collection_name=COLLECTION_INGEST_JOBS,
+                                            object_key=job["id"])
 
         if response["status_code"] != 200:
             raise JobError(f"Failed to update job: {response}")
@@ -809,9 +805,8 @@ def clear_collection_data(
 
         for key in update_keys:
             try:
-                custom_storage.DeleteObject(
-                                 collection_name=COLLECTION_UPDATE_TRACKER,
-                                 object_key=key)
+                custom_storage.DeleteObject(collection_name=COLLECTION_UPDATE_TRACKER,
+                                            object_key=key)
                 logger.info(f"Cleared update tracker data for key: {key}")
             except Exception as e:
                 logger.info(f"No update tracker data to clear for key {key}: {str(e)}")
@@ -827,9 +822,8 @@ def clear_update_id_for_type(
         object_key = f"{KEY_LAST_UPDATE}_{ioc_type}"
         logger.info(f"Clearing update_id for type {ioc_type} (key: {object_key})")
 
-        custom_storage.DeleteObject(
-                         collection_name=COLLECTION_UPDATE_TRACKER,
-                         object_key=object_key)
+        custom_storage.DeleteObject(collection_name=COLLECTION_UPDATE_TRACKER,
+                                    object_key=object_key)
         logger.info(f"Successfully cleared update_id for type {ioc_type}")
 
     except Exception as e:
@@ -1408,9 +1402,8 @@ def check_and_recover_missing_files(
                     tracker_key = ioc_type_key
 
                 try:
-                    custom_storage.GetObject(
-                        collection_name=COLLECTION_UPDATE_TRACKER,
-                        object_key=f"{KEY_LAST_UPDATE}_{tracker_key}")
+                    custom_storage.GetObject(collection_name=COLLECTION_UPDATE_TRACKER,
+                                             object_key=f"{KEY_LAST_UPDATE}_{tracker_key}")
                     # Tracker exists but file is gone — this type needs recovery
                     previously_tracked_missing.append((filename, tracker_key))
                 except Exception:
