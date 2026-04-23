@@ -29,7 +29,7 @@ test.describe('Anomali Threatstream E2E Tests', () => {
 
     const workflowLink = page.getByRole('link', { name: /Anomali.*Intelligence.*Ingest/i });
     await workflowLink.click();
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     const workflowDetailsIndicator = page.getByText(/Schedule|Trigger|Configuration/).first();
     await expect(workflowDetailsIndicator).toBeVisible({ timeout: 10000 });
