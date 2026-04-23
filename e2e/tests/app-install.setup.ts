@@ -1,19 +1,13 @@
-import { test as setup } from '../src/fixtures';
+import { test as setup } from '@playwright/test';
+import { AppCatalogPage, config } from '@crowdstrike/foundry-playwright';
 
-setup('install Anomali Threatstream app', async ({ appCatalogPage, appName }) => {
-  // Check if app is already installed (this navigates to the app page)
-  const isInstalled = await appCatalogPage.isAppInstalled(appName);
-
-  if (!isInstalled) {
-    console.log(`App '${appName}' is not installed. Installing...`);
-
-    // Try installation without disabling provisioning first
-    const installed = await appCatalogPage.installApp(appName);
-
-    if (!installed) {
-      throw new Error(`Failed to install app '${appName}'`);
-    }
-  } else {
-    console.log(`App '${appName}' is already installed`);
-  }
+setup('install app', async ({ page }) => {
+  const catalog = new AppCatalogPage(page);
+  await catalog.installApp(config.appName, {
+    configureSettings: async (page) => {
+      await page.getByLabel('Name').fill('Anomali ThreatStream');
+      await page.getByLabel('API URL').fill(process.env.ANOMALI_API_URL!);
+      await page.getByLabel('API key').fill('test-api-key-12345');
+    },
+  });
 });
