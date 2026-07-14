@@ -358,8 +358,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
     @patch('main.CustomStorage')
     @patch('main.NGSIEM')
     @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
-    def test_no_valid_iocs_advances_cursor_with_next(self, mock_ngsiem_class, mock_custom_storage_class, mock_api_integrations_class):
-        """Test that when all IOCs are unsupported types but meta has 'next', the cursor advances and 'next' is returned."""
+    def test_no_valid_iocs_advances_cursor_with_next(
+        self, mock_ngsiem_class, mock_custom_storage_class, mock_api_integrations_class
+    ):
+        """Test that unsupported IOC types with meta 'next' advances cursor."""
         from crowdstrike.foundry.function import Request
 
         # Setup mocks
