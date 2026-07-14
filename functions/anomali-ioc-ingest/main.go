@@ -1868,7 +1868,7 @@ func normalizeIOCType(itype string) string {
 		return "domain"
 	case "mal_url", "apt_url":
 		return "url"
-	case "apt_email", "mal_email":
+	case "apt_email", "mal_email", "compromised_email":
 		return "email"
 	case "apt_md5", "mal_md5":
 		return "hash_md5"

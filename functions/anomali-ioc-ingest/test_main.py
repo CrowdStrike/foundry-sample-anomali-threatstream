@@ -323,10 +323,11 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_custom_storage.GetObject.side_effect = [
             Exception("Object not found"),
         ]
-        # create_job + update_job (mark as completed)
+        # create_job + update_job (mark as completed) + save_update_id
         mock_custom_storage.PutObject.side_effect = [
             {"status_code": 200},          # create_job
             {"status_code": 200},          # update_job (mark as completed)
+            {"status_code": 200},          # save_update_id
         ]
 
         # Return IOCs with unknown/invalid types that can't be processed
@@ -349,9 +350,69 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # Should return success but with no files created
         self.assertEqual(response.code, 200)
         self.assertEqual(response.body["message"], "No valid IOCs to process")
-        self.assertEqual(response.body["total_iocs"], 0)
+        self.assertEqual(response.body["total_iocs"], 2)
         self.assertEqual(response.body["files_created"], 0)
-        self.assertNotIn("next", response.body)  # No next field when pagination complete
+        self.assertNotIn("next", response.body)  # No next field when meta.next is None
+
+    @patch('main.APIIntegrations')
+    @patch('main.CustomStorage')
+    @patch('main.NGSIEM')
+    @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
+    def test_no_valid_iocs_advances_cursor_with_next(self, mock_ngsiem_class, mock_custom_storage_class, mock_api_integrations_class):
+        """Test that when all IOCs are unsupported types but meta has 'next', the cursor advances and 'next' is returned."""
+        from crowdstrike.foundry.function import Request
+
+        # Setup mocks
+        mock_api_integrations = MagicMock()
+        mock_custom_storage = MagicMock()
+        mock_ngsiem = MagicMock()
+        mock_api_integrations_class.return_value = mock_api_integrations
+        mock_custom_storage_class.return_value = mock_custom_storage
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Mock NGSIEM - no existing files found (fresh start)
+        mock_ngsiem.get_file.return_value = {"status_code": 404}
+
+        # Mock API responses - fresh start
+        mock_custom_storage.DeleteObject.side_effect = [Exception("Not found")] * 9
+        mock_custom_storage.GetObject.side_effect = [
+            Exception("Object not found"),
+        ]
+        # create_job + update_job (mark as completed) + save_update_id
+        mock_custom_storage.PutObject.side_effect = [
+            {"status_code": 200},          # create_job
+            {"status_code": 200},          # update_job (mark as completed)
+            {"status_code": 200},          # save_update_id
+        ]
+
+        # Return IOCs with unsupported types BUT meta has a valid "next" URL
+        mock_api_integrations.execute_command_proxy.return_value = {
+            "status_code": 200,
+            "body": {
+                "objects": [
+                    {"id": 1, "itype": "unknown_type", "value": "val1", "update_id": "100"},
+                    {"id": 2, "itype": "another_unknown", "value": "val2", "update_id": "101"}
+                ],
+                "meta": {
+                    "total_count": 1000,
+                    "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+                }
+            }
+        }
+
+        request = Request()
+        request.body = {"repository": "search-all"}
+
+        response = main.on_post(request, _config=None, logger=mock_logger)
+
+        # Should return success with 0 files but cursor must advance
+        self.assertEqual(response.code, 200)
+        self.assertEqual(response.body["files_created"], 0)
+        self.assertEqual(response.body["total_iocs"], 2)
+        # Critical: "next" field MUST be present so pagination continues
+        self.assertIn("next", response.body)
+        self.assertEqual(response.body["next"], "101")
 
     @patch('main.APIIntegrations')
     @patch('main.CustomStorage')
@@ -540,6 +601,28 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
             self.assertEqual(len(csv_files), 0)
             mock_logger.warning.assert_called()
+
+    def test_process_iocs_to_csv_compromised_email(self):
+        """Test process_iocs_to_csv normalizes compromised_email to email type."""
+        mock_logger = MagicMock()
+
+        iocs = [
+            {"itype": "compromised_email", "value": "victim@example.com",
+             "confidence": 80, "threat_type": "compromised", "source": "anomali",
+             "tags": [], "expiration_ts": "", "meta": {}}
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_files, stats = main.process_iocs_to_csv(iocs, temp_dir, {}, mock_logger)
+
+            self.assertEqual(len(csv_files), 1)
+            filename = os.path.basename(csv_files[0])
+            self.assertEqual(filename, "anomali_threatstream_email.csv")
+
+            with open(csv_files[0], 'r') as f:
+                content = f.read()
+            self.assertIn("email.sender.address", content)
+            self.assertIn("victim@example.com", content)
 
     @patch('main.NGSIEM')
     def test_upload_csv_files_to_ngsiem_success(self, mock_ngsiem_class):

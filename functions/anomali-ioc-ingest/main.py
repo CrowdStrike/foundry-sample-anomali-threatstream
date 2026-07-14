@@ -879,7 +879,7 @@ def process_iocs_to_csv(
             ioc_type = "domain"
         elif ioc_type in ["mal_url", "apt_url"]:
             ioc_type = "url"
-        elif ioc_type in ["apt_email", "mal_email"]:
+        elif ioc_type in ["apt_email", "mal_email", "compromised_email"]:
             ioc_type = "email"
         elif ioc_type in ["apt_md5", "mal_md5"]:
             ioc_type = "hash_md5"
@@ -1609,21 +1609,42 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 logger.info(f"Phase 3 complete: Created {len(csv_files)} CSV files in {format_elapsed_time(phase3_elapsed)}")
 
                 if not csv_files:
-                    # Mark job as completed but no valid data (if job exists)
+                    # No supported IOC types produced CSV files, but we still
+                    # need to advance the cursor to avoid re-fetching the same page
                     if job:
                         job["state"] = JOB_COMPLETED
                         update_job(custom_storage, job, logger)
 
+                    # Advance the update_id so next run doesn't get stuck
+                    if meta and iocs:
+                        update_ids = [str(ioc["update_id"]) for ioc in iocs if 'update_id' in ioc]
+                        max_update_id = max(update_ids) if update_ids else "0"
+
+                        update_data = {
+                            "created_timestamp": datetime.now(timezone.utc).isoformat(),
+                            "total_count": meta.get("total_count", len(iocs)),
+                            "next_url": meta.get("next") or "",
+                            "update_id": max_update_id
+                        }
+                        save_update_id(custom_storage, update_data, type_filter, logger)
+
+                    # Extract next token so workflow can continue to next page
+                    next_token_value = extract_next_token_from_meta(meta, iocs, logger)
+
+                    response_body = {
+                        "message": "No valid IOCs to process",
+                        "total_iocs": len(iocs),
+                        "files_created": 0,
+                        "upload_results": [],
+                        "job_id": job["id"] if job else "pagination-call",
+                        "meta": meta or {}
+                    }
+
+                    if next_token_value:
+                        response_body["next"] = next_token_value
+
                     return Response(
-                        body={
-                            "message": "No valid IOCs to process",
-                            "total_iocs": 0,
-                            "files_created": 0,
-                            "upload_results": [],
-                            "job_id": job["id"] if job else "pagination-call",
-                            "meta": {}
-                            # No "next" field - pagination complete
-                        },
+                        body=response_body,
                         code=200
                     )
 

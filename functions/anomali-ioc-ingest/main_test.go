@@ -37,6 +37,7 @@ func TestNormalizeIOCType(t *testing.T) {
 		{"apt_url", "url"},
 		{"apt_email", "email"},
 		{"mal_email", "email"},
+		{"compromised_email", "email"},
 		{"apt_md5", "hash_md5"},
 		{"mal_md5", "hash_md5"},
 		{"apt_sha1", "hash_sha1"},
@@ -354,6 +355,53 @@ func TestProcessIOCsToCSV_UnknownType(t *testing.T) {
 	// Should not create any files for unknown types
 	if len(csvFiles) != 0 {
 		t.Errorf("Expected 0 CSV files for unknown type, got %d", len(csvFiles))
+	}
+}
+
+func TestProcessIOCsToCSV_CompromisedEmail(t *testing.T) {
+	logger := slog.Default()
+	tempDir := t.TempDir()
+
+	iocs := []IOC{
+		{
+			IType:      "compromised_email",
+			Value:      "victim@example.com",
+			Confidence: 80,
+			ThreatType: "compromised",
+			Source:     "anomali",
+		},
+	}
+
+	existingFiles := make(map[string]string)
+
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	if err != nil {
+		t.Fatalf("processIOCsToCSV failed: %v", err)
+	}
+
+	if len(csvFiles) != 1 {
+		t.Fatalf("Expected 1 CSV file, got %d", len(csvFiles))
+	}
+
+	if !strings.HasSuffix(csvFiles[0], "anomali_threatstream_email.csv") {
+		t.Errorf("Expected email CSV file, got %s", csvFiles[0])
+	}
+
+	content, err := os.ReadFile(csvFiles[0])
+	if err != nil {
+		t.Fatalf("Failed to read CSV: %v", err)
+	}
+	contentStr := string(content)
+
+	if !strings.Contains(contentStr, "email.sender.address") {
+		t.Error("CSV missing email.sender.address header")
+	}
+	if !strings.Contains(contentStr, "victim@example.com") {
+		t.Error("CSV missing email value")
+	}
+
+	if stats.TotalNewIOCs != 1 {
+		t.Errorf("Expected TotalNewIOCs=1, got %d", stats.TotalNewIOCs)
 	}
 }
 
@@ -2360,6 +2408,8 @@ func TestNormalizeIOCType_AllVariants(t *testing.T) {
 		{"apt_md5", "hash_md5"},
 		{"apt_sha1", "hash_sha1"},
 		{"apt_sha256", "hash_sha256"},
+		// Compromised variants
+		{"compromised_email", "email"},
 		// Unknown
 		{"unknown", ""},
 		{"", ""},
