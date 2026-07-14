@@ -1611,22 +1611,27 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 if not csv_files:
                     # No supported IOC types produced CSV files, but we still
                     # need to advance the cursor to avoid re-fetching the same page
-                    if job:
-                        job["state"] = JOB_COMPLETED
-                        update_job(custom_storage, job, logger)
 
-                    # Advance the update_id so next run doesn't get stuck
-                    if meta and iocs:
+                    # Advance the update_id first (durably) so a fresh run
+                    # doesn't re-fetch the same page of unsupported IOCs. Gate
+                    # on iocs alone, not meta, so the cursor still advances even
+                    # if the API omits the meta envelope.
+                    if iocs:
                         update_ids = [str(ioc["update_id"]) for ioc in iocs if 'update_id' in ioc]
-                        max_update_id = max(update_ids) if update_ids else "0"
+                        max_update_id = max(update_ids, key=int) if update_ids else "0"
 
                         update_data = {
                             "created_timestamp": datetime.now(timezone.utc).isoformat(),
-                            "total_count": meta.get("total_count", len(iocs)),
-                            "next_url": meta.get("next") or "",
+                            "total_count": meta.get("total_count", len(iocs)) if meta else len(iocs),
+                            "next_url": (meta.get("next") or "") if meta else "",
                             "update_id": max_update_id
                         }
                         save_update_id(custom_storage, update_data, type_filter, logger)
+
+                    # Mark job as completed after the cursor is durably saved
+                    if job:
+                        job["state"] = JOB_COMPLETED
+                        update_job(custom_storage, job, logger)
 
                     # Extract next token so workflow can continue to next page
                     next_token_value = extract_next_token_from_meta(meta, iocs, logger)
@@ -1672,7 +1677,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 if meta and iocs:
                     # Get the highest update_id from processed IOCs
                     update_ids = [str(ioc["update_id"]) for ioc in iocs if 'update_id' in ioc]
-                    max_update_id = max(update_ids) if update_ids else "0"
+                    max_update_id = max(update_ids, key=int) if update_ids else "0"
 
                     update_data = {
                         "created_timestamp": datetime.now(timezone.utc).isoformat(),
