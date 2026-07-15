@@ -211,7 +211,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
     @patch('main.download_existing_lookup_files')
     @patch('main.clear_update_id_for_type')
     @patch('main.NGSIEM')
-    @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
     def test_missing_file_recovery_scenario(self, mock_ngsiem_class, mock_clear_update_id,
                                           mock_download_files, mock_custom_storage_class,
                                           mock_api_integrations_class):
@@ -295,7 +294,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
     @patch('main.APIIntegrations')
     @patch('main.CustomStorage')
     @patch('main.NGSIEM')
-    @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
     def test_no_valid_iocs_scenario(self, mock_ngsiem_class, mock_custom_storage_class, mock_api_integrations_class):
         """Test scenario where IOCs are fetched but none are valid for processing (lines 1441-1445)."""
         from crowdstrike.foundry.function import Request
@@ -323,9 +321,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_custom_storage.GetObject.side_effect = [
             Exception("Object not found"),
         ]
-        # create_job + update_job (mark as completed)
+        # create_job + save_update_id + update_job (cursor saved before completion)
         mock_custom_storage.PutObject.side_effect = [
             {"status_code": 200},          # create_job
+            {"status_code": 200},          # save_update_id
             {"status_code": 200},          # update_job (mark as completed)
         ]
 
@@ -349,13 +348,137 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # Should return success but with no files created
         self.assertEqual(response.code, 200)
         self.assertEqual(response.body["message"], "No valid IOCs to process")
-        self.assertEqual(response.body["total_iocs"], 0)
+        self.assertEqual(response.body["total_iocs"], 2)
         self.assertEqual(response.body["files_created"], 0)
-        self.assertNotIn("next", response.body)  # No next field when pagination complete
+        self.assertNotIn("next", response.body)  # No next field when meta.next is None
 
     @patch('main.APIIntegrations')
     @patch('main.CustomStorage')
-    @patch.dict(os.environ, {'CS_CLOUD': 'https://api.crowdstrike.com'})
+    @patch('main.NGSIEM')
+    def test_no_valid_iocs_advances_cursor_with_next(
+        self, mock_ngsiem_class, mock_custom_storage_class, mock_api_integrations_class
+    ):
+        """Test that unsupported IOC types with meta 'next' advances cursor."""
+        from crowdstrike.foundry.function import Request
+
+        # Setup mocks
+        mock_api_integrations = MagicMock()
+        mock_custom_storage = MagicMock()
+        mock_ngsiem = MagicMock()
+        mock_api_integrations_class.return_value = mock_api_integrations
+        mock_custom_storage_class.return_value = mock_custom_storage
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Mock NGSIEM - no existing files found (fresh start)
+        mock_ngsiem.get_file.return_value = {"status_code": 404}
+
+        # Mock API responses - fresh start
+        mock_custom_storage.DeleteObject.side_effect = [Exception("Not found")] * 9
+        mock_custom_storage.GetObject.side_effect = [
+            Exception("Object not found"),
+        ]
+        # create_job + save_update_id + update_job (cursor saved before completion)
+        mock_custom_storage.PutObject.side_effect = [
+            {"status_code": 200},          # create_job
+            {"status_code": 200},          # save_update_id
+            {"status_code": 200},          # update_job (mark as completed)
+        ]
+
+        # Return IOCs with unsupported types BUT meta has a valid "next" URL
+        mock_api_integrations.execute_command_proxy.return_value = {
+            "status_code": 200,
+            "body": {
+                "objects": [
+                    {"id": 1, "itype": "unknown_type", "value": "val1", "update_id": "100"},
+                    {"id": 2, "itype": "another_unknown", "value": "val2", "update_id": "101"}
+                ],
+                "meta": {
+                    "total_count": 1000,
+                    "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+                }
+            }
+        }
+
+        request = Request()
+        request.body = {"repository": "search-all"}
+
+        response = main.on_post(request, _config=None, logger=mock_logger)
+
+        # Should return success with 0 files but cursor must advance
+        self.assertEqual(response.code, 200)
+        self.assertEqual(response.body["files_created"], 0)
+        self.assertEqual(response.body["total_iocs"], 2)
+        # Critical: "next" field MUST be present so pagination continues
+        self.assertIn("next", response.body)
+        self.assertEqual(response.body["next"], "101")
+
+        # Critical: the cursor MUST be persisted via save_update_id so a fresh
+        # run doesn't re-fetch the same page. Verify a PutObject wrote the
+        # update tracker with the advanced update_id (not just the response next).
+        save_update_calls = [
+            c for c in mock_custom_storage.PutObject.call_args_list
+            if c.kwargs.get("collection_name") == main.COLLECTION_UPDATE_TRACKER
+        ]
+        self.assertEqual(len(save_update_calls), 1, "save_update_id must be called exactly once")
+        self.assertEqual(save_update_calls[0].kwargs["body"]["update_id"], "101")
+
+    @patch('main.APIIntegrations')
+    @patch('main.CustomStorage')
+    @patch('main.NGSIEM')
+    def test_no_valid_iocs_advances_cursor_without_meta(
+        self, mock_ngsiem_class, mock_custom_storage_class, mock_api_integrations_class
+    ):
+        """Test cursor still advances when IOCs exist but meta is empty."""
+        from crowdstrike.foundry.function import Request
+
+        mock_api_integrations = MagicMock()
+        mock_custom_storage = MagicMock()
+        mock_ngsiem = MagicMock()
+        mock_api_integrations_class.return_value = mock_api_integrations
+        mock_custom_storage_class.return_value = mock_custom_storage
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        mock_ngsiem.get_file.return_value = {"status_code": 404}
+        mock_custom_storage.DeleteObject.side_effect = [Exception("Not found")] * 9
+        mock_custom_storage.GetObject.side_effect = [Exception("Object not found")]
+        mock_custom_storage.PutObject.side_effect = [
+            {"status_code": 200},          # create_job
+            {"status_code": 200},          # save_update_id
+            {"status_code": 200},          # update_job (mark as completed)
+        ]
+
+        # Unsupported types, and meta is empty (API omitted the envelope)
+        mock_api_integrations.execute_command_proxy.return_value = {
+            "status_code": 200,
+            "body": {
+                "objects": [
+                    {"id": 1, "itype": "unknown_type", "value": "val1", "update_id": "100"},
+                    {"id": 2, "itype": "another_unknown", "value": "val2", "update_id": "101"}
+                ],
+                "meta": {}
+            }
+        }
+
+        request = Request()
+        request.body = {"repository": "search-all"}
+
+        response = main.on_post(request, _config=None, logger=mock_logger)
+
+        self.assertEqual(response.code, 200)
+        self.assertEqual(response.body["files_created"], 0)
+        # No meta.next, so no "next" token, but the cursor MUST still advance
+        self.assertNotIn("next", response.body)
+        save_update_calls = [
+            c for c in mock_custom_storage.PutObject.call_args_list
+            if c.kwargs.get("collection_name") == main.COLLECTION_UPDATE_TRACKER
+        ]
+        self.assertEqual(len(save_update_calls), 1, "cursor must advance even without meta")
+        self.assertEqual(save_update_calls[0].kwargs["body"]["update_id"], "101")
+
+    @patch('main.APIIntegrations')
+    @patch('main.CustomStorage')
     def test_api_error_handling(self, mock_custom_storage_class, mock_api_integrations_class):
         """Test API error handling in fetch_iocs_from_anomali (lines 552-556)."""
         from crowdstrike.foundry.function import Request
@@ -540,6 +663,28 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
             self.assertEqual(len(csv_files), 0)
             mock_logger.warning.assert_called()
+
+    def test_process_iocs_to_csv_compromised_email(self):
+        """Test process_iocs_to_csv normalizes compromised_email to email type."""
+        mock_logger = MagicMock()
+
+        iocs = [
+            {"itype": "compromised_email", "value": "victim@example.com",
+             "confidence": 80, "threat_type": "compromised", "source": "anomali",
+             "tags": [], "expiration_ts": "", "meta": {}}
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_files, stats = main.process_iocs_to_csv(iocs, temp_dir, {}, mock_logger)
+
+            self.assertEqual(len(csv_files), 1)
+            filename = os.path.basename(csv_files[0])
+            self.assertEqual(filename, "anomali_threatstream_email.csv")
+
+            with open(csv_files[0], 'r') as f:
+                content = f.read()
+            self.assertIn("email.sender.address", content)
+            self.assertIn("victim@example.com", content)
 
     @patch('main.NGSIEM')
     def test_upload_csv_files_to_ngsiem_success(self, mock_ngsiem_class):
