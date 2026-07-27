@@ -1845,9 +1845,6 @@
     }
   },
   "info": {
-    "contact": {
-      "email": "praveen.bathala@crowdstrike.com"
-    },
     "description": "Anomali API",
     "title": "Anomali API",
     "version": "1.0"
