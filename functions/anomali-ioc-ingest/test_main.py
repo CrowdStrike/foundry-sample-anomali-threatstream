@@ -135,7 +135,9 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             # First run doesn't have time constraints for fresh start
             self.assertNotIn("modified_ts_lt", result["parameters"])
             self.assertNotIn("modified_ts_gt", result["parameters"])
-            self.assertIn("update_id__gt", result["parameters"])
+            # Cold start must omit the cursor entirely (some accounts reject a zero cursor)
+            self.assertNotIn("update_id__gt", result["parameters"])
+            self.assertNotIn("search_after", result["parameters"])
 
     def test_create_job_incremental_sync(self):
         """Test create_job for incremental sync (with previous update)."""
@@ -154,7 +156,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
             result = main.create_job(mock_custom_storage, last_update, "hash", mock_logger)
 
-            self.assertEqual(result["parameters"]["update_id__gt"], "12345")
+            self.assertEqual(result["parameters"]["search_after"], "12345")
 
     def test_fetch_iocs_from_anomali_success(self):
         """Test fetch_iocs_from_anomali success."""
@@ -1423,8 +1425,9 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             None, "active", "ip", 1000, mock_api_client, mock_headers, mock_logger, None
         )
 
-        # Should still work with fallback parameters
-        self.assertEqual(result["update_id__gt"], "0")
+        # Should still work with fallback parameters (cursor omitted on cold start)
+        self.assertNotIn("update_id__gt", result)
+        self.assertNotIn("search_after", result)
         self.assertEqual(result["type"], "ip")
         self.assertEqual(result["status"], "active")
 
@@ -1471,8 +1474,9 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 None, "active", "ip", 1000, mock_api_client, mock_headers, mock_logger, None
             )
 
-            # Should start from 0 when no saved update_id
-            self.assertEqual(result["update_id__gt"], "0")
+            # Should omit the cursor when no saved update_id (cold start)
+            self.assertNotIn("update_id__gt", result)
+            self.assertNotIn("search_after", result)
             self.assertEqual(result["type"], "ip")
             self.assertEqual(result["status"], "active")
 
@@ -1651,25 +1655,25 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {
             "id": "test-job",
             "parameters": {
-                "update_id__gt": "job_stored_12345",
+                "search_after": "job_stored_12345",
                 "status": "active"
             }
         }
 
-        # Test that job's update_id is used instead of calling get_last_update_id
+        # Test that job's cursor is used instead of calling get_last_update_id
         result = main.build_query_params(
             None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job
         )
 
-        # Should use job's stored update_id
-        self.assertEqual(result["update_id__gt"], "job_stored_12345")
+        # Should use job's stored cursor
+        self.assertEqual(result["search_after"], "job_stored_12345")
         self.assertEqual(result["status"], "active")
         self.assertEqual(result["limit"], 1000)
         self.assertEqual(result["order_by"], "update_id")
 
         # Verify the new log message format
         expected_params = {
-            'update_id__gt': 'job_stored_12345', 'status': 'active',
+            'search_after': 'job_stored_12345', 'status': 'active',
             'limit': 1000, 'order_by': 'update_id'
         }
         mock_logger.info.assert_any_call(
@@ -1686,7 +1690,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {
             "id": "test-job",
             "parameters": {
-                "update_id__gt": "job_stored_67890",
+                "search_after": "job_stored_67890",
                 "status": "active",
                 "type": "ip"
             }
@@ -1697,7 +1701,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         )
 
         # Should use job's stored parameters
-        self.assertEqual(result["update_id__gt"], "job_stored_67890")
+        self.assertEqual(result["search_after"], "job_stored_67890")
         self.assertEqual(result["type"], "ip")
         self.assertEqual(result["status"], "active")
         self.assertEqual(result["limit"], 1000)
@@ -1713,7 +1717,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {
             "id": "test-job",
             "parameters": {
-                "update_id__gt": "12345",
+                "search_after": "12345",
                 "status": "active",
                 "type": "ip"
             }
@@ -1740,7 +1744,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {
             "id": "test-job",
             "parameters": {
-                "update_id__gt": "12345",
+                "search_after": "12345",
                 "status": "active"
             }
         }
@@ -1766,7 +1770,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {
             "id": "test-job",
             "parameters": {
-                "update_id__gt": "12345",
+                "search_after": "12345",
                 "status": "active"
             }
         }
@@ -1791,7 +1795,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {
             "id": "test-job",
             "parameters": {
-                "update_id__gt": "12345",
+                "search_after": "12345",
                 "status": "active"
             }
         }
@@ -1812,7 +1816,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         job = {
             "id": "test-job",
             "parameters": {
-                "update_id__gt": "12345",
+                "search_after": "12345",
                 "status": "active"
             }
         }
@@ -1957,7 +1961,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertEqual(result["state"], "running")
             self.assertEqual(result["ioc_type"], "all")
             self.assertEqual(result["parameters"]["status"], "active")
-            self.assertEqual(result["parameters"]["update_id__gt"], "0")
+            self.assertNotIn("update_id__gt", result["parameters"])
+            self.assertNotIn("search_after", result["parameters"])
             self.assertNotIn("type", result["parameters"])  # No type filter for all types
 
             # Test with specific IOC type
