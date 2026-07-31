@@ -30,7 +30,6 @@ import (
 	"strings"
 	"time"
 
-	fdk "github.com/CrowdStrike/foundry-fn-go"
 	"github.com/crowdstrike/gofalcon/falcon"
 	"github.com/crowdstrike/gofalcon/falcon/client"
 	"github.com/crowdstrike/gofalcon/falcon/client/api_integrations"
@@ -38,6 +37,8 @@ import (
 	"github.com/crowdstrike/gofalcon/falcon/client/ngsiem"
 	"github.com/crowdstrike/gofalcon/falcon/models"
 	"github.com/go-openapi/runtime"
+
+	fdk "github.com/CrowdStrike/foundry-fn-go"
 )
 
 // Constants
@@ -2358,9 +2359,14 @@ func buildQueryParams(req IngestRequest, job *IngestJob, nextToken string) map[s
 	if req.Status != "" {
 		queryParams["status"] = req.Status
 	}
-	// Use "type" parameter for IOC type filtering (API accepts both "type" and "itype")
+	// Use "type" parameter for IOC type filtering
+	// Map hash subtypes (md5, sha1, sha256) to "hash" for the Anomali API
 	if req.Type != "" {
-		queryParams["type"] = req.Type
+		apiType := req.Type
+		if req.Type == "md5" || req.Type == "sha1" || req.Type == "sha256" {
+			apiType = "hash"
+		}
+		queryParams["type"] = apiType
 	}
 	if req.TrustedCircles != "" {
 		queryParams["trustedcircles"] = req.TrustedCircles

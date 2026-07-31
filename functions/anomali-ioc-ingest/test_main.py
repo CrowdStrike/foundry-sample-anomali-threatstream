@@ -1088,7 +1088,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             mock_sleep.assert_called_once_with(6.5)
 
     def test_process_iocs_with_existing_file_merge(self):
-        """Test process_iocs_to_csv with existing file merge and deduplication."""
+        """Test process_iocs_to_csv with existing file merge and deduplication (disk-based path)."""
         mock_logger = MagicMock()
 
         new_iocs = [
@@ -1114,14 +1114,17 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             }
         ]
 
-        # Existing file with one IP already
-        existing_files = {
-            "anomali_threatstream_ip.csv":
-                "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
-                "1.2.3.4,95,existing,,original,tag1,2024-12-31T23:59:59Z\n"
-        }
-
         with tempfile.TemporaryDirectory() as temp_dir:
+            # Write existing file to a real temp path for disk-based merge
+            existing_file_path = os.path.join(temp_dir, "existing_anomali_threatstream_ip.csv")
+            with open(existing_file_path, 'w', encoding='utf-8') as f:
+                f.write("destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n")
+                f.write("1.2.3.4,95,existing,,original,tag1,2024-12-31T23:59:59Z\n")
+
+            existing_files = {
+                "anomali_threatstream_ip.csv": existing_file_path
+            }
+
             csv_files, stats = main.process_iocs_to_csv(new_iocs, temp_dir, existing_files, mock_logger)
 
             self.assertEqual(len(csv_files), 1)
@@ -2253,6 +2256,300 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
             result = main.estimate_final_file_sizes([test_file], 100, 1000000, {}, mock_logger)
 
             self.assertIsNone(result)
+
+    def test_response_stream_adapter(self):
+        """Test ResponseStreamAdapter with known byte sequences."""
+        import io
+
+        # Simulate a response with iter_content
+        chunks = [b"hello ", b"world\n", b"second line\n"]
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = iter(chunks)
+
+        adapter = main.ResponseStreamAdapter(mock_response, chunk_size=65536)
+
+        # Read into a buffer
+        buf = bytearray(6)
+        n = adapter.readinto(buf)
+        self.assertEqual(n, 6)
+        self.assertEqual(bytes(buf[:n]), b"hello ")
+
+        buf = bytearray(100)
+        n = adapter.readinto(buf)
+        self.assertEqual(n, 6 + 12)  # "world\n" + "second line\n"
+        self.assertEqual(bytes(buf[:n]), b"world\nsecond line\n")
+
+        # Verify EOF
+        buf = bytearray(10)
+        n = adapter.readinto(buf)
+        self.assertEqual(n, 0)
+
+        # Verify total bytes consumed
+        self.assertEqual(adapter.bytes_consumed, len(b"hello world\nsecond line\n"))
+
+    def test_response_stream_adapter_with_text_wrapper(self):
+        """Test ResponseStreamAdapter works with TextIOWrapper and csv.reader."""
+        import io
+
+        csv_content = b"col1,col2\nval1,val2\nval3,val4\n"
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = iter([csv_content])
+
+        adapter = main.ResponseStreamAdapter(mock_response, chunk_size=65536)
+        text_stream = io.TextIOWrapper(io.BufferedReader(adapter), encoding='utf-8')
+        reader = csv.reader(text_stream)
+
+        rows = list(reader)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0], ["col1", "col2"])
+        self.assertEqual(rows[1], ["val1", "val2"])
+        self.assertEqual(rows[2], ["val3", "val4"])
+        self.assertEqual(adapter.bytes_consumed, len(csv_content))
+
+    @patch('main.NGSIEM')
+    def test_check_existing_file_metadata(self, mock_ngsiem_class):
+        """Test check_existing_file_metadata returns correct filename->size mapping."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Mock responses: ip exists (200), domain not found (404)
+        mock_resp_ip = MagicMock()
+        mock_resp_ip.status_code = 200
+        mock_resp_ip.headers = {"Content-Length": "1048576"}
+
+        mock_resp_domain = MagicMock()
+        mock_resp_domain.status_code = 404
+
+        mock_ngsiem.get_file.side_effect = [mock_resp_ip, mock_resp_domain]
+
+        result = main.check_existing_file_metadata("search-all", "ip", mock_logger)
+
+        self.assertEqual(result, {"anomali_threatstream_ip.csv": 1048576})
+        self.assertEqual(mock_ngsiem.get_file.call_count, 1)  # Only 1 file for type "ip"
+
+    @patch('main.NGSIEM')
+    def test_check_existing_file_metadata_hash_type(self, mock_ngsiem_class):
+        """Test check_existing_file_metadata with hash type (checks all 3 hash files)."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Mock responses: md5 exists, sha1 exists, sha256 not found
+        mock_resp_md5 = MagicMock()
+        mock_resp_md5.status_code = 200
+        mock_resp_md5.headers = {"Content-Length": "500000"}
+
+        mock_resp_sha1 = MagicMock()
+        mock_resp_sha1.status_code = 200
+        mock_resp_sha1.headers = {"Content-Length": "600000"}
+
+        mock_resp_sha256 = MagicMock()
+        mock_resp_sha256.status_code = 404
+
+        mock_ngsiem.get_file.side_effect = [mock_resp_md5, mock_resp_sha1, mock_resp_sha256]
+
+        result = main.check_existing_file_metadata("search-all", "hash", mock_logger)
+
+        self.assertEqual(result, {
+            "anomali_threatstream_hash_md5.csv": 500000,
+            "anomali_threatstream_hash_sha1.csv": 600000
+        })
+
+    @patch('main.NGSIEM')
+    def test_stream_merge_from_ngsiem_success(self, mock_ngsiem_class):
+        """Test stream_merge_from_ngsiem correctly merges streamed data with new rows."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Existing CSV content on NGSIEM
+        existing_csv = (
+            "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
+            "1.2.3.4,80,malware,high,feed1,tag1,2025-01-01\n"
+            "9.9.9.9,70,botnet,medium,feed2,,2025-06-01\n"
+        )
+        csv_bytes = existing_csv.encode('utf-8')
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Length": str(len(csv_bytes))}
+        mock_resp.iter_content.return_value = iter([csv_bytes])
+
+        mock_ngsiem.get_file.return_value = mock_resp
+
+        columns = ["destination.ip", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"]
+        new_rows = {
+            "1.2.3.4": ["1.2.3.4", "95", "apt", "critical", "new_feed", "newtag", "2026-01-01"],
+            "5.5.5.5": ["5.5.5.5", "60", "phishing", "low", "feed3", "", "2026-03-01"]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
+
+            original_count, duplicates_updated, rows_written = main.stream_merge_from_ngsiem(
+                "search-all", "anomali_threatstream_ip.csv", output_path,
+                columns, new_rows, len(csv_bytes), mock_logger
+            )
+
+            self.assertEqual(original_count, 2)
+            self.assertEqual(duplicates_updated, 1)  # 1.2.3.4 is a duplicate
+            self.assertEqual(rows_written, 3)  # 9.9.9.9 (kept) + 2 new
+
+            # Verify output file content
+            with open(output_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            self.assertEqual(len(rows), 3)
+            rows_by_ip = {row["destination.ip"]: row for row in rows}
+
+            # Existing non-duplicate row kept
+            self.assertIn("9.9.9.9", rows_by_ip)
+            self.assertEqual(rows_by_ip["9.9.9.9"]["confidence"], "70")
+
+            # New rows written
+            self.assertIn("1.2.3.4", rows_by_ip)
+            self.assertEqual(rows_by_ip["1.2.3.4"]["confidence"], "95")  # New value
+            self.assertIn("5.5.5.5", rows_by_ip)
+
+    @patch('main.NGSIEM')
+    def test_stream_merge_from_ngsiem_404(self, mock_ngsiem_class):
+        """Test stream_merge_from_ngsiem handles 404 (file disappeared) gracefully."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+
+        mock_ngsiem.get_file.return_value = mock_resp
+
+        columns = ["destination.ip", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"]
+        new_rows = {"1.2.3.4": ["1.2.3.4", "90", "malware", "high", "feed1", "", ""]}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
+
+            original_count, duplicates_updated, rows_written = main.stream_merge_from_ngsiem(
+                "search-all", "anomali_threatstream_ip.csv", output_path,
+                columns, new_rows, 1000, mock_logger
+            )
+
+            self.assertEqual(original_count, 0)
+            self.assertEqual(duplicates_updated, 0)
+            self.assertEqual(rows_written, 0)
+
+    @patch('main.NGSIEM')
+    def test_stream_merge_from_ngsiem_retry_on_truncation(self, mock_ngsiem_class):
+        """Test stream_merge_from_ngsiem retries when stream is truncated."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Full CSV content
+        existing_csv = (
+            "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
+            "1.2.3.4,80,malware,high,feed1,tag1,2025-01-01\n"
+        )
+        csv_bytes = existing_csv.encode('utf-8')
+        # Claim the file is larger than what will actually be delivered on first 2 attempts
+        claimed_size = len(csv_bytes) + 100
+
+        # First attempt: stream delivers only len(csv_bytes) but claimed_size is larger → truncation
+        mock_resp_truncated = MagicMock()
+        mock_resp_truncated.status_code = 200
+        mock_resp_truncated.headers = {"Content-Length": str(claimed_size)}
+        mock_resp_truncated.iter_content.return_value = iter([csv_bytes])
+
+        # Second attempt: also truncated
+        mock_resp_truncated2 = MagicMock()
+        mock_resp_truncated2.status_code = 200
+        mock_resp_truncated2.headers = {"Content-Length": str(claimed_size)}
+        mock_resp_truncated2.iter_content.return_value = iter([csv_bytes])
+
+        # Third attempt: delivers the "correct" amount (use real claimed_size as expected)
+        # Just pass a stream that has exactly `claimed_size` bytes
+        # Pad with newlines at end (empty rows are harmless in csv - they produce empty row lists)
+        padded_csv = csv_bytes + b"\n" * (claimed_size - len(csv_bytes))
+        mock_resp_good = MagicMock()
+        mock_resp_good.status_code = 200
+        mock_resp_good.headers = {"Content-Length": str(claimed_size)}
+        mock_resp_good.iter_content.return_value = iter([padded_csv])
+
+        mock_ngsiem.get_file.side_effect = [mock_resp_truncated, mock_resp_truncated2, mock_resp_good]
+
+        columns = ["destination.ip", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"]
+        new_rows = {"5.5.5.5": ["5.5.5.5", "60", "phishing", "low", "feed3", "", ""]}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
+
+            original_count, duplicates_updated, rows_written = main.stream_merge_from_ngsiem(
+                "search-all", "anomali_threatstream_ip.csv", output_path,
+                columns, new_rows, claimed_size, mock_logger
+            )
+
+            # Third attempt succeeds - get_file called 3 times
+            self.assertEqual(mock_ngsiem.get_file.call_count, 3)
+            # The existing CSV has 1 real data row (plus trailing empty newlines that get counted)
+            self.assertGreaterEqual(original_count, 1)
+            self.assertEqual(rows_written, 2)  # 1 existing + 1 new
+
+    @patch('main.NGSIEM')
+    def test_process_iocs_stream_merge_path(self, mock_ngsiem_class):
+        """Test process_iocs_to_csv uses stream-merge when existing_files values are ints."""
+        mock_ngsiem = MagicMock()
+        mock_ngsiem_class.return_value = mock_ngsiem
+        mock_logger = MagicMock()
+
+        # Existing CSV content on NGSIEM
+        existing_csv = (
+            "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
+            "9.9.9.9,70,botnet,medium,feed2,,2025-06-01\n"
+        )
+        csv_bytes = existing_csv.encode('utf-8')
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"Content-Length": str(len(csv_bytes))}
+        mock_resp.iter_content.return_value = iter([csv_bytes])
+        mock_ngsiem.get_file.return_value = mock_resp
+
+        new_iocs = [
+            {
+                "itype": "ip",
+                "ip": "5.6.7.8",
+                "confidence": 85,
+                "threat_type": "botnet",
+                "meta": {"severity": "medium"},
+                "source": "test2",
+                "tags": [],
+                "expiration_ts": ""
+            }
+        ]
+
+        # existing_files with int value (Content-Length) triggers stream-merge
+        existing_files = {
+            "anomali_threatstream_ip.csv": len(csv_bytes)
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_files, stats = main.process_iocs_to_csv(
+                new_iocs, temp_dir, existing_files, mock_logger, repository="search-all"
+            )
+
+            self.assertEqual(len(csv_files), 1)
+
+            with open(csv_files[0], 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            # 1 existing (9.9.9.9) + 1 new (5.6.7.8) = 2
+            self.assertEqual(len(rows), 2)
+            rows_by_ip = {row["destination.ip"]: row for row in rows}
+            self.assertIn("9.9.9.9", rows_by_ip)
+            self.assertIn("5.6.7.8", rows_by_ip)
 
 
 if __name__ == "__main__":

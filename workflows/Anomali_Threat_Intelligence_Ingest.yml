@@ -1,7 +1,7 @@
 name: Anomali Threat Intelligence Ingest
 description: Anomali ThreatStream IOC ingestion on schedule every hour
 parameters: {}
-provision_on_install: true
+provision_on_install: false
 trigger:
     next:
         - CreateVariable
