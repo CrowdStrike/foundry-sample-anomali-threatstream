@@ -206,6 +206,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertIn('definition_id="Anomali API"', content,
                      "Should use descriptive definition_id='Anomali API'")
 
+    @patch.dict(os.environ, {"TEST_MODE": "true"})
     @patch('main.APIIntegrations')
     @patch('main.CustomStorage')
     @patch('main.download_existing_lookup_files')
@@ -2259,8 +2260,6 @@ class TestEstimateFinalFileSizes(unittest.TestCase):
 
     def test_response_stream_adapter(self):
         """Test ResponseStreamAdapter with known byte sequences."""
-        import io
-
         # Simulate a response with iter_content
         chunks = [b"hello ", b"world\n", b"second line\n"]
         mock_response = MagicMock()

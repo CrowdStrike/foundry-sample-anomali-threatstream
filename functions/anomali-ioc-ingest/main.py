@@ -205,6 +205,7 @@ class ResponseStreamAdapter(io.RawIOBase):
 
     @property
     def bytes_consumed(self):
+        """Total number of bytes consumed from the response stream."""
         return self._bytes_consumed
 
 
@@ -839,6 +840,7 @@ def check_existing_file_metadata(
     Returns filename -> Content-Length mapping for existing files only.
     Uses same retry logic as download function (5 attempts, exponential backoff).
     """
+    # pylint: disable=too-many-branches,too-many-statements
     existing_files = {}
     max_retries = 5
 
@@ -1077,7 +1079,7 @@ def stream_merge_from_ngsiem(
             if attempt == max_retries:
                 raise AnomaliFunctionError(
                     f"Stream-merge failed for {filename} after {max_retries} retries: {e}"
-                )
+                ) from e
 
     # Should not reach here, but satisfy linter
     raise AnomaliFunctionError(f"Stream-merge failed for {filename} after {max_retries} retries")
@@ -1668,7 +1670,7 @@ def extract_next_token_from_meta(meta, iocs, logger):
     return next_token
 
 
-def check_and_recover_missing_files(
+def check_and_recover_missing_files(  # pylint: disable=too-many-branches
         repository: str,
         type_filter: Optional[str],
         temp_dir: str,
