@@ -773,10 +773,13 @@ func createJob(ctx context.Context, falconClient *client.CrowdStrikeAPISpecifica
 	}
 
 	if lastUpdate != nil {
-		jobParams["update_id__gt"] = lastUpdate.UpdateID
+		// Use search_after as the incremental cursor. Anomali's native pagination
+		// returns search_after in meta.next, and it accepts a plain update_id value.
+		// Avoid update_id__gt: some ThreatStream accounts reject it with HTTP 400.
+		jobParams["search_after"] = lastUpdate.UpdateID
 		logger.Info("Incremental sync - resuming from last update_id", "type", iocType, "update_id", lastUpdate.UpdateID)
 	} else {
-		jobParams["update_id__gt"] = "0"
+		// Fresh start: omit the cursor entirely so Anomali returns from the beginning.
 		logger.Info("Fresh start - no previous update_id found", "type", iocType)
 	}
 
@@ -2691,10 +2694,13 @@ func createJobWithClient(ctx context.Context, storage CustomStorageClient, lastU
 	}
 
 	if lastUpdate != nil {
-		jobParams["update_id__gt"] = lastUpdate.UpdateID
+		// Use search_after as the incremental cursor. Anomali's native pagination
+		// returns search_after in meta.next, and it accepts a plain update_id value.
+		// Avoid update_id__gt: some ThreatStream accounts reject it with HTTP 400.
+		jobParams["search_after"] = lastUpdate.UpdateID
 		logger.Info("Incremental sync - resuming from last update_id", "type", iocType, "update_id", lastUpdate.UpdateID)
 	} else {
-		jobParams["update_id__gt"] = "0"
+		// Fresh start: omit the cursor entirely so Anomali returns from the beginning.
 		logger.Info("Fresh start - no previous update_id found", "type", iocType)
 	}
 
@@ -2852,20 +2858,24 @@ func buildQueryParams(req IngestRequest, job *IngestJob, nextToken string) map[s
 	if req.FeedID != "" {
 		queryParams["feed_id"] = req.FeedID
 	}
-	// Use update_id__gt for pagination (cursor-based, not offset-based)
+	// Use search_after for pagination. This is Anomali's native cursor (returned in
+	// meta.next) and works on all accounts. update_id__gt is avoided because some
+	// ThreatStream accounts reject it with HTTP 400.
 	if nextToken != "" {
-		queryParams["update_id__gt"] = nextToken
+		queryParams["search_after"] = nextToken
 	} else if job != nil {
-		// Use job parameters for initial call
-		if updateIDGt, ok := job.Parameters["update_id__gt"].(string); ok {
-			queryParams["update_id__gt"] = updateIDGt
-		} else {
-			queryParams["update_id__gt"] = "0"
+		// Use job's stored cursor for the initial call. Support both the new
+		// search_after key and the legacy update_id__gt key for in-flight jobs.
+		if searchAfter, ok := job.Parameters["search_after"].(string); ok {
+			queryParams["search_after"] = searchAfter
+		} else if updateIDGt, ok := job.Parameters["update_id__gt"].(string); ok && updateIDGt != "0" {
+			queryParams["search_after"] = updateIDGt
 		}
+		// Fresh start (no stored cursor): omit search_after so Anomali returns from the beginning.
 
 		// Allow manual overrides for initial calls only
 		if req.UpdateIDGt != "" {
-			queryParams["update_id__gt"] = req.UpdateIDGt
+			queryParams["search_after"] = req.UpdateIDGt
 		}
 		if req.ModifiedTsGt != "" {
 			queryParams["modified_ts__gt"] = req.ModifiedTsGt
@@ -2874,11 +2884,11 @@ func buildQueryParams(req IngestRequest, job *IngestJob, nextToken string) map[s
 			queryParams["modified_ts__lt"] = req.ModifiedTsLt
 		}
 	} else {
-		queryParams["update_id__gt"] = "0"
+		// Fresh start: omit search_after so Anomali returns from the beginning.
 
 		// Allow manual overrides for initial calls only
 		if req.UpdateIDGt != "" {
-			queryParams["update_id__gt"] = req.UpdateIDGt
+			queryParams["search_after"] = req.UpdateIDGt
 		}
 		if req.ModifiedTsGt != "" {
 			queryParams["modified_ts__gt"] = req.ModifiedTsGt

@@ -354,8 +354,7 @@ def create_job(
 
         job_params = {
             "status": "active",
-            "order_by": "update_id",
-            "update_id__gt": "0"  # Start from beginning for testing
+            "order_by": "update_id"
         }
 
         # Add type filter for type-specific jobs
@@ -389,7 +388,10 @@ def create_job(
         job_params["type"] = ioc_type
 
     if last_update:
-        job_params["update_id__gt"] = last_update.get("update_id", "0")
+        # Use search_after as the incremental cursor. Anomali's native pagination
+        # returns search_after in meta.next, and it accepts a plain update_id value.
+        # Avoid update_id__gt: some ThreatStream accounts reject it with HTTP 400.
+        job_params["search_after"] = last_update.get("update_id", "")
         # Add lookback time for incremental sync - use 65 minutes to ensure
         # no data gaps with hourly scheduling
         lookback_time = now - timedelta(minutes=65)
@@ -397,9 +399,8 @@ def create_job(
         # Add upper time bound for incremental sync to ensure consistency
         job_params["modified_ts_lt"] = now.isoformat()
     else:
-        # Fresh start for this type - get all available data (no time constraints)
-        job_params["update_id__gt"] = "0"
-        # No time constraints for fresh start to get all historical data
+        # Fresh start for this type - get all available data (no time constraints).
+        # Omit the cursor entirely so Anomali returns from the beginning.
         logger.info(f"Fresh start for type {ioc_type or 'all types'} - no time constraints")
 
     job = {
@@ -1514,12 +1515,12 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
     """
     # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument,too-many-locals,too-many-statements
     if next_token:
-        # Pagination call: only use update_id__gt, no time constraints
+        # Pagination call: use search_after (Anomali's native cursor), no time constraints
         logger.info(f"PAGINATION BRANCH: Using next_token: {next_token}")
         query_params = {
             "order_by": "update_id",
             "limit": limit,
-            "update_id__gt": next_token
+            "search_after": next_token
         }
         # Add status filter only if specified
         if status_filter:
@@ -1529,7 +1530,7 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
         if type_filter:
             api_type = "hash" if type_filter in ("md5", "sha1", "sha256") else type_filter
             query_params["type"] = api_type
-        logger.info(f"PAGINATION: Set update_id__gt to: {query_params["update_id__gt"]}")
+        logger.info(f"PAGINATION: Set search_after to: {query_params["search_after"]}")
         # NOTE: No time constraints for pagination - they limit data incorrectly
     else:
         # Initial call: use job parameters if available
@@ -1549,14 +1550,13 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
                 logger.info(f"INITIAL: Overriding status with request parameter: {status_filter}")
 
         else:
-            # Fallback logic for when no job exists (shouldn't happen with new architecture)
+            # Fallback logic for when no job exists (shouldn't happen with new architecture).
+            # Omit the cursor entirely on cold start so Anomali returns from the beginning.
             logger.warning("INITIAL: No job found - using fallback parameter construction")
 
-            start_update_id = "0"
             query_params = {
                 "order_by": "update_id",
-                "limit": limit,
-                "update_id__gt": start_update_id
+                "limit": limit
             }
 
             # Add type filter if specified
@@ -1582,11 +1582,11 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
                 query_params["modified_ts__lt"] = request_body["modified_ts_lt"]
                 logger.info("INITIAL: Manual modified_ts_lt override applied")
             if 'update_id_gt' in request_body:
-                old_value = query_params.get('update_id__gt')
-                query_params["update_id__gt"] = request_body["update_id_gt"]
+                old_value = query_params.get('search_after')
+                query_params["search_after"] = request_body["update_id_gt"]
                 logger.info(
-                    f"INITIAL: Manual override changed update_id__gt from "
-                    f"{old_value} to {query_params['update_id__gt']}"
+                    f"INITIAL: Manual override changed search_after from "
+                    f"{old_value} to {query_params['search_after']}"
                 )
 
     # Add trusted circles filtering if provided (works for both initial and pagination)

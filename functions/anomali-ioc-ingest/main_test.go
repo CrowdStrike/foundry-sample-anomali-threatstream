@@ -1384,8 +1384,8 @@ func TestIngestJobStructure(t *testing.T) {
 		State:            JobRunning,
 		IOCType:          "ip",
 		Parameters: map[string]interface{}{
-			"status":        "active",
-			"update_id__gt": "0",
+			"status":       "active",
+			"search_after": "0",
 		},
 	}
 
@@ -1703,9 +1703,13 @@ func TestCreateJobFirstRun(t *testing.T) {
 		t.Errorf("Job state = %q, expected %q", job.State, JobRunning)
 	}
 
-	// Verify fresh start parameters
-	if updateIDGt, ok := job.Parameters["update_id__gt"].(string); !ok || updateIDGt != "0" {
-		t.Errorf("Expected update_id__gt = '0' for first run, got %v", job.Parameters["update_id__gt"])
+	// Verify fresh start omits the cursor entirely (no update_id__gt, no search_after).
+	// Some ThreatStream accounts reject a zero cursor with HTTP 400.
+	if _, ok := job.Parameters["update_id__gt"]; ok {
+		t.Errorf("Expected no update_id__gt for first run, got %v", job.Parameters["update_id__gt"])
+	}
+	if _, ok := job.Parameters["search_after"]; ok {
+		t.Errorf("Expected no search_after for first run, got %v", job.Parameters["search_after"])
 	}
 
 	// Verify PutObject was called
@@ -1735,9 +1739,9 @@ func TestCreateJobIncrementalSync(t *testing.T) {
 		t.Fatal("Expected non-nil job")
 	}
 
-	// Verify incremental sync parameters
-	if updateIDGt, ok := job.Parameters["update_id__gt"].(string); !ok || updateIDGt != "12345" {
-		t.Errorf("Expected update_id__gt = '12345', got %v", job.Parameters["update_id__gt"])
+	// Verify incremental sync parameters (stored as search_after cursor)
+	if searchAfter, ok := job.Parameters["search_after"].(string); !ok || searchAfter != "12345" {
+		t.Errorf("Expected search_after = '12345', got %v", job.Parameters["search_after"])
 	}
 	if job.IOCType != "ip" {
 		t.Errorf("Job IOCType = %q, expected 'ip'", job.IOCType)
@@ -1943,7 +1947,7 @@ func TestBuildQueryParamsBasic(t *testing.T) {
 
 	job := &IngestJob{
 		Parameters: map[string]interface{}{
-			"update_id__gt": "12345",
+			"search_after": "12345",
 		},
 	}
 
@@ -1962,8 +1966,8 @@ func TestBuildQueryParamsBasic(t *testing.T) {
 	if params["limit"] != 1000 {
 		t.Errorf("Expected limit = 1000, got %v", params["limit"])
 	}
-	if params["update_id__gt"] != "12345" {
-		t.Errorf("Expected update_id__gt = '12345', got %v", params["update_id__gt"])
+	if params["search_after"] != "12345" {
+		t.Errorf("Expected search_after = '12345', got %v", params["search_after"])
 	}
 }
 
@@ -1976,13 +1980,13 @@ func TestBuildQueryParamsWithPagination(t *testing.T) {
 
 	params := buildQueryParams(req, nil, "page_token_123")
 
-	// Pagination token should override job's update_id__gt
-	if params["update_id__gt"] != "page_token_123" {
-		t.Errorf("Expected update_id__gt = 'page_token_123', got %v", params["update_id__gt"])
+	// Pagination token should be sent as search_after
+	if params["search_after"] != "page_token_123" {
+		t.Errorf("Expected search_after = 'page_token_123', got %v", params["search_after"])
 	}
 }
 
-// TestBuildQueryParamsDefaultUpdateID tests buildQueryParams defaults to "0"
+// TestBuildQueryParamsDefaultUpdateID tests buildQueryParams omits the cursor on cold start
 func TestBuildQueryParamsDefaultUpdateID(t *testing.T) {
 	req := IngestRequest{
 		Limit: 1000,
@@ -1990,9 +1994,13 @@ func TestBuildQueryParamsDefaultUpdateID(t *testing.T) {
 
 	params := buildQueryParams(req, nil, "")
 
-	// Should default to "0" when no job and no pagination
-	if params["update_id__gt"] != "0" {
-		t.Errorf("Expected update_id__gt = '0', got %v", params["update_id__gt"])
+	// Cold start (no job, no pagination): cursor must be omitted entirely.
+	// Some ThreatStream accounts reject update_id__gt/search_after=0 with HTTP 400.
+	if _, ok := params["search_after"]; ok {
+		t.Errorf("Expected no search_after on cold start, got %v", params["search_after"])
+	}
+	if _, ok := params["update_id__gt"]; ok {
+		t.Errorf("Expected no update_id__gt on cold start, got %v", params["update_id__gt"])
 	}
 }
 
@@ -2108,14 +2116,14 @@ func TestBuildQueryParamsJobUpdateID(t *testing.T) {
 
 	job := &IngestJob{
 		Parameters: map[string]interface{}{
-			"update_id__gt": "job_stored_67890",
+			"search_after": "job_stored_67890",
 		},
 	}
 
 	params := buildQueryParams(req, job, "")
 
-	if params["update_id__gt"] != "job_stored_67890" {
-		t.Errorf("Expected update_id__gt from job = 'job_stored_67890', got %v", params["update_id__gt"])
+	if params["search_after"] != "job_stored_67890" {
+		t.Errorf("Expected search_after from job = 'job_stored_67890', got %v", params["search_after"])
 	}
 }
 
@@ -2129,20 +2137,20 @@ func TestBuildQueryParamsUpdateIDGtOverride(t *testing.T) {
 
 	job := &IngestJob{
 		Parameters: map[string]interface{}{
-			"update_id__gt": "job_value_456",
+			"search_after": "job_value_456",
 		},
 	}
 
-	// Initial call (no pagination token) - manual override SHOULD apply
+	// Initial call (no pagination token) - manual override SHOULD apply (as search_after)
 	params := buildQueryParams(req, job, "")
-	if params["update_id__gt"] != "manual_override_123" {
-		t.Errorf("Expected update_id__gt = 'manual_override_123' (manual override for initial call), got %v", params["update_id__gt"])
+	if params["search_after"] != "manual_override_123" {
+		t.Errorf("Expected search_after = 'manual_override_123' (manual override for initial call), got %v", params["search_after"])
 	}
 
 	// Test 2: Pagination call - manual override should NOT apply (matching Python behavior)
 	paramsWithPagination := buildQueryParams(req, job, "pagination_token_789")
-	if paramsWithPagination["update_id__gt"] != "pagination_token_789" {
-		t.Errorf("Expected update_id__gt = 'pagination_token_789' (pagination takes precedence), got %v", paramsWithPagination["update_id__gt"])
+	if paramsWithPagination["search_after"] != "pagination_token_789" {
+		t.Errorf("Expected search_after = 'pagination_token_789' (pagination takes precedence), got %v", paramsWithPagination["search_after"])
 	}
 }
 
