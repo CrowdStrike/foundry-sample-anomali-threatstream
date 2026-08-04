@@ -14,7 +14,7 @@ flowchart TD
     InitCheck -->|Yes| SkipJob["<b>Skip Job Creation</b><br/>Pagination call"]
 
     CreateJob --> GetState["<b>Get Last Update ID</b><br/>Query: last_update_{type}<br/>65-min lookback buffer"]
-    SkipJob --> UseToken["<b>Use Workflow Token</b><br/>Direct: update_id__gt=token"]
+    SkipJob --> UseToken["<b>Use Workflow Token</b><br/>Direct: search_after=token"]
 
     GetState --> Query["<b>Query Anomali API</b><br/>status=active<br/>type={ioc_type}<br/>limit=1000"]
     UseToken --> Query
@@ -84,12 +84,12 @@ The diagram above illustrates the complete pagination flow for a single IOC type
 1. **Job Creation**: Creates a unique job record with type-specific ID (e.g., `{uuid}_ip`)
 2. **State Retrieval**: Fetches last saved `update_id` from collections (e.g., `last_update_ip`)
 3. **Lookback Buffer**: Applies 65-minute buffer to ensure no IOCs are missed between runs
-4. **API Query**: Requests IOCs with `update_id__gt={saved_value}&type=ip&limit=1000`
+4. **API Query**: Requests IOCs with `search_after={saved_value}&type=ip&limit=1000` (cursor omitted on cold start)
 
 ### Pagination Calls (next_token present)
 1. **Job Skipping**: No new job created, reuses initial job ID for tracking
-2. **Direct Token Use**: Uses workflow's `next_token` directly as `update_id__gt` parameter
-3. **API Query**: Requests next page with `update_id__gt={next_token}&type=ip&limit=1000`
+2. **Direct Token Use**: Uses workflow's `next_token` directly as `search_after` parameter
+3. **API Query**: Requests next page with `search_after={next_token}&type=ip&limit=1000`
 
 ### Data Processing
 1. **Download**: Retrieves existing CSV file from NGSIEM lookup tables
@@ -126,7 +126,7 @@ The function returns `"next": "0"` when pagination should stop. The workflow che
 ### Missing File Recovery
 When a lookup file is deleted, the system automatically detects this and triggers recovery:
 - Clears both type-specific keys (e.g., `last_update_ip`) AND the main `last_update` key
-- Next run starts from `update_id__gt: "0"` to fetch all historical IOCs
+- Next run omits the cursor entirely (fresh start) to fetch all historical IOCs
 - Rebuilds the deleted file with complete data
 
 ## Quality Assurance
@@ -184,7 +184,7 @@ When a lookup file is deleted, the system automatically detects this and trigger
 
 **Delta Query Parameters**:
 - **Initial calls**: Create job records and use saved `update_id` state from collections with 65-minute lookback buffer
-- **Pagination calls**: Use workflow-provided `next_token` directly as `update_id__gt` parameter for continuation
+- **Pagination calls**: Use workflow-provided `next_token` directly as `search_after` parameter for continuation
 - **Clean separation**: Initial and pagination calls follow separate, non-overlapping code paths to prevent parameter conflicts
 - Includes a 65-minute lookback buffer to ensure no data is missed between hourly workflow runs
 
@@ -196,9 +196,9 @@ When a lookup file is deleted, the system automatically detects this and trigger
 - **Termination handling**: Function returns `"next": "0"` when no more data, workflow condition checks `!= "0"`
 - **Early termination**: Stops pagination when all remaining IOCs are duplicates to prevent infinite loops
 
-**Token Progression**: Parses the API's `meta.next` URL to extract correct pagination parameters with the following priority order:
-1. **search_after** - The actual next boundary token (highest priority, most accurate)
-2. **update_id__gt** - Greater-than filter for update IDs (fallback for older API responses)
+**Token Progression**: Parses the API's `meta.next` URL to extract the pagination cursor with the following priority order:
+1. **search_after** - Anomali's native pagination cursor (highest priority, works on all accounts)
+2. **update_id__gt** - Legacy parameter (fallback for older API responses; some accounts reject it)
 3. **from_update_id** - Legacy parameter name (rare, for backward compatibility)
 4. **Last IOC's update_id** - Final fallback using the highest update_id from current batch
 
@@ -212,14 +212,14 @@ This prioritization ensures proper token advancement and prevents missing or dup
 - **File existence check**: Downloads existing files to identify missing ones
 - **Type-specific clearing**: Clears `last_update_{type}` keys for missing file types
 - **Main key clearing**: Also clears main `last_update` key for no-type-filter jobs
-- **Fresh start trigger**: Missing files cause function to start from `update_id__gt: "0"`
+- **Fresh start trigger**: Missing files cause function to omit the cursor entirely (fresh start)
 - **Full recreation**: Fetches all historical IOCs for missing types
 
 **Recovery Process**:
 1. User deletes `anomali_threatstream_ip.csv`
 2. Next workflow run detects missing file
 3. Function clears both `last_update_ip` and `last_update` keys
-4. API query uses `update_id__gt: "0"` (fresh start)
+4. API query omits the cursor (fresh start, returns from beginning)
 5. All IP IOCs fetched from beginning
 6. New `anomali_threatstream_ip.csv` file created with complete data
 
