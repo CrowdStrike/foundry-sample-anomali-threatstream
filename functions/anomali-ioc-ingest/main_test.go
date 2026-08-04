@@ -161,9 +161,9 @@ func TestProcessIOCsToCSV_IPType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -214,9 +214,9 @@ func TestProcessIOCsToCSV_DomainType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -261,8 +261,8 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 		t.Fatalf("Failed to write existing file: %v", err)
 	}
 
-	existingFilePaths := map[string]string{
-		"anomali_threatstream_ip.csv": existingFilePath,
+	existingFilePaths := map[string]ExistingFileInfo{
+		"anomali_threatstream_ip.csv": {TempPath: existingFilePath},
 	}
 
 	// New IOCs - one update, one new
@@ -287,7 +287,7 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 		},
 	}
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFilePaths, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -345,9 +345,9 @@ func TestProcessIOCsToCSV_UnknownType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -372,9 +372,9 @@ func TestProcessIOCsToCSV_CompromisedEmail(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -415,9 +415,9 @@ func TestProcessIOCsToCSV_MultipleTypes(t *testing.T) {
 		{IType: "hash_md5", Value: "d41d8cd98f00b204e9800998ecf8427e", Confidence: 95},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -471,9 +471,9 @@ func TestProcessIOCsToCSV_Deduplication(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1014,9 +1014,9 @@ func TestProcessIOCsToCSV_HashTypes(t *testing.T) {
 		{IType: "hash_sha256", Value: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", Confidence: 95},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1065,9 +1065,9 @@ func TestProcessIOCsToCSV_URLType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1113,9 +1113,9 @@ func TestProcessIOCsToCSV_EmailType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1169,9 +1169,9 @@ func TestProcessIOCsToCSV_ITypeMapping(t *testing.T) {
 		{IType: "mal_sha256", Value: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", Confidence: 90},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1218,15 +1218,15 @@ something,value
 		t.Fatalf("Failed to write existing file: %v", err)
 	}
 
-	existingFilePaths := map[string]string{
-		"anomali_threatstream_ip.csv": existingFilePath,
+	existingFilePaths := map[string]ExistingFileInfo{
+		"anomali_threatstream_ip.csv": {TempPath: existingFilePath},
 	}
 
 	iocs := []IOC{
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90},
 	}
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
+	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFilePaths, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1258,9 +1258,9 @@ func TestProcessIOCsToCSV_EmptyPrimaryValue(t *testing.T) {
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90}, // Valid IP
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -2371,9 +2371,9 @@ func TestProcessIOCsToCSV_FileSizeWarning(t *testing.T) {
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90},
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -2512,9 +2512,9 @@ func TestProcessIOCsToCSV_BatchProcessing(t *testing.T) {
 		}
 	}
 
-	existingFiles := make(map[string]string)
+	existingFiles := make(map[string]ExistingFileInfo)
 
-	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -2717,7 +2717,7 @@ func TestEstimateFinalFileSizes(t *testing.T) {
 	logger := slog.Default()
 
 	t.Run("skips check when existing files present", func(t *testing.T) {
-		existingFiles := map[string]string{"test.csv": "/tmp/test.csv"}
+		existingFiles := map[string]ExistingFileInfo{"test.csv": {TempPath: "/tmp/test.csv"}}
 		err := estimateFinalFileSizes([]string{}, 100, 1000000, existingFiles, logger)
 		if err != nil {
 			t.Errorf("Expected nil error when existing files present, got: %v", err)
@@ -2725,14 +2725,14 @@ func TestEstimateFinalFileSizes(t *testing.T) {
 	})
 
 	t.Run("skips check when no IOCs in batch", func(t *testing.T) {
-		err := estimateFinalFileSizes([]string{}, 0, 1000000, map[string]string{}, logger)
+		err := estimateFinalFileSizes([]string{}, 0, 1000000, map[string]ExistingFileInfo{}, logger)
 		if err != nil {
 			t.Errorf("Expected nil error when no IOCs in batch, got: %v", err)
 		}
 	})
 
 	t.Run("skips check when totalCount is zero", func(t *testing.T) {
-		err := estimateFinalFileSizes([]string{}, 100, 0, map[string]string{}, logger)
+		err := estimateFinalFileSizes([]string{}, 100, 0, map[string]ExistingFileInfo{}, logger)
 		if err != nil {
 			t.Errorf("Expected nil error when totalCount is zero, got: %v", err)
 		}
@@ -2753,7 +2753,7 @@ func TestEstimateFinalFileSizes(t *testing.T) {
 		}
 
 		// With 10 IOCs in batch and 1000 total, projected size should be ~50KB (well under 200MB)
-		err := estimateFinalFileSizes([]string{testFile}, 10, 1000, map[string]string{}, logger)
+		err := estimateFinalFileSizes([]string{testFile}, 10, 1000, map[string]ExistingFileInfo{}, logger)
 		if err != nil {
 			t.Errorf("Expected nil error for small projected size, got: %v", err)
 		}
@@ -2776,7 +2776,7 @@ func TestEstimateFinalFileSizes(t *testing.T) {
 		// With 100 IOCs in batch and 100 million total, projected size should exceed 200MB
 		// 5KB / 100 records = 50 bytes/record
 		// 100,000,000 records * 50 bytes = 5GB (way over limit)
-		err := estimateFinalFileSizes([]string{testFile}, 100, 100000000, map[string]string{}, logger)
+		err := estimateFinalFileSizes([]string{testFile}, 100, 100000000, map[string]ExistingFileInfo{}, logger)
 		if err == nil {
 			t.Error("Expected error when projected size exceeds 200MB limit")
 		}
@@ -2787,7 +2787,7 @@ func TestEstimateFinalFileSizes(t *testing.T) {
 
 	t.Run("handles missing file gracefully", func(t *testing.T) {
 		// Pass a non-existent file - should not panic, just skip
-		err := estimateFinalFileSizes([]string{"/nonexistent/file.csv"}, 100, 1000000, map[string]string{}, logger)
+		err := estimateFinalFileSizes([]string{"/nonexistent/file.csv"}, 100, 1000000, map[string]ExistingFileInfo{}, logger)
 		if err != nil {
 			t.Errorf("Expected nil error for missing file (should skip), got: %v", err)
 		}
