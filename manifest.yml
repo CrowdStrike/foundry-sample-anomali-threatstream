@@ -86,6 +86,10 @@ workflows:
       name: Anomali Threat Intelligence Ingest
       path: workflows/Anomali_Threat_Intelligence_Ingest.yml
       permissions: []
+    - id: ""
+      name: Anomali Threat Intelligence Ingest Parallel
+      path: workflows/Anomali_Threat_Intelligence_Ingest_Parallel.yml
+      permissions: []
 parsers: []
 logscale:
     saved_searches: []
