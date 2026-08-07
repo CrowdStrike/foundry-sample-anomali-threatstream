@@ -989,6 +989,13 @@ def stream_merge_from_ngsiem(
                 stream=True
             )
 
+            # Get Content-Length from THIS response for truncation detection
+            cl_header = resp.headers.get("Content-Length") if hasattr(resp, 'headers') else None
+            resp_content_length = int(cl_header) if cl_header is not None else 0
+            logger.info(f"Stream-merge response Content-Length for {filename}: "
+                        f"{resp_content_length if cl_header is not None else 'missing'} "
+                        f"(expected from metadata: {expected_size})")
+
             status_code = 0
             if hasattr(resp, 'status_code'):
                 status_code = resp.status_code
@@ -1056,14 +1063,23 @@ def stream_merge_from_ngsiem(
                 writer.writerows(new_rows.values())
                 rows_written += len(new_rows)
 
-            # Verify bytes consumed matches expected size
-            if expected_size > 0 and adapter.bytes_consumed != expected_size:
-                # Truncated stream - delete partial output and retry
+            # Verify bytes consumed against THIS response's Content-Length (truncation check)
+            if resp_content_length > 0 and adapter.bytes_consumed != resp_content_length:
+                # Genuine truncation within this response - delete partial output and retry
                 if os.path.exists(output_path):
                     os.remove(output_path)
                 raise IOError(
                     f"Stream truncated for {filename}: consumed {adapter.bytes_consumed} bytes, "
-                    f"expected {expected_size}"
+                    f"response Content-Length was {resp_content_length}"
+                )
+
+            # Warn if file size changed between metadata check and streaming response
+            if (expected_size > 0 and resp_content_length > 0
+                    and resp_content_length != expected_size):
+                logger.warning(
+                    f"File {filename} size changed between metadata check and stream: "
+                    f"metadata={expected_size}, response={resp_content_length} "
+                    f"(possible concurrent write)"
                 )
 
             logger.info(
