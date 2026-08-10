@@ -49,6 +49,7 @@ auth:
     scopes:
         - humio-auth-proxy:write
         - humio-auth-proxy:read
+        - ngsiem-lookup-files:write
     permissions: {}
     roles: []
 functions:

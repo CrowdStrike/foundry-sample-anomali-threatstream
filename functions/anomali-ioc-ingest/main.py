@@ -61,9 +61,9 @@ from falconpy import APIIntegrations, NGSIEM, CustomStorage
 
 FUNC = Function.instance()
 
-# Maximum file size for NGSIEM lookup uploads (200 MB)
-MAX_UPLOAD_SIZE_BYTES = 200 * 1024 * 1024
-WARNING_THRESHOLD_BYTES = 180 * 1024 * 1024  # Warn when approaching limit
+# Maximum file size for NGSIEM lookup uploads (2 GB)
+MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024
+WARNING_THRESHOLD_BYTES = 1.8 * 1024 * 1024 * 1024  # Warn when approaching limit
 
 
 class AnomaliFunctionError(Exception):
@@ -952,156 +952,6 @@ def check_existing_file_metadata(
     return existing_files
 
 
-def stream_merge_from_ngsiem(
-        repository: str, filename: str, output_path: str,
-        columns: List[str], new_rows: Dict[str, List[str]],
-        expected_size: int, logger: Logger
-) -> tuple:
-    """Stream existing NGSIEM file and merge with new_rows into output_path.
-
-    Reads the existing file directly from the network as a streaming CSV,
-    deduplicates against new_rows, and writes merged output to output_path.
-    Never materializes the existing file on disk.
-
-    Returns (original_count, duplicates_updated, rows_written).
-    """
-    # pylint: disable=too-many-branches,too-many-statements,too-many-locals
-    max_retries = 5
-    new_keys = set(new_rows.keys())
-    primary_col = columns[0]
-
-    for attempt in range(1, max_retries + 1):
-        if attempt > 1:
-            backoff = min(5 * (2 ** (attempt - 2)), 60)
-            logger.info(f"Retrying stream-merge for {filename} after {backoff}s "
-                        f"(attempt {attempt}/{max_retries})")
-            time.sleep(backoff)
-
-        original_count = 0
-        duplicates_updated = 0
-        rows_written = 0
-
-        try:
-            ngsiem = NGSIEM(timeout=600)
-            resp = ngsiem.get_file(
-                repository=repository,
-                filename=filename,
-                stream=True
-            )
-
-            # Get Content-Length from THIS response for truncation detection
-            cl_header = resp.headers.get("Content-Length") if hasattr(resp, 'headers') else None
-            resp_content_length = int(cl_header) if cl_header is not None else 0
-            logger.info(f"Stream-merge response Content-Length for {filename}: "
-                        f"{resp_content_length if cl_header is not None else 'missing'} "
-                        f"(expected from metadata: {expected_size})")
-
-            status_code = 0
-            if hasattr(resp, 'status_code'):
-                status_code = resp.status_code
-            elif isinstance(resp, dict):
-                status_code = resp.get("status_code", 0)
-
-            # File disappeared between metadata check and merge
-            if status_code == 404:
-                logger.warning(f"File {filename} disappeared (404) - writing new data only")
-                return (0, 0, 0)
-
-            if status_code not in (0, 200):
-                raise IOError(f"HTTP {status_code} from NGSIEM for {filename}")
-
-            # Wrap response in streaming adapter
-            adapter = ResponseStreamAdapter(resp, chunk_size=65536)
-            text_stream = io.TextIOWrapper(io.BufferedReader(adapter), encoding='utf-8')
-            reader = csv.reader(text_stream)
-
-            # Open output file
-            with open(output_path, 'w', newline='', encoding='utf-8', buffering=1024*1024) as outfile:
-                writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
-                writer.writerow(columns)  # Write header
-
-                # Read and verify stream header
-                try:
-                    header = next(reader)
-                except StopIteration:
-                    # Empty file - just write new rows
-                    writer.writerows(new_rows.values())
-                    rows_written = len(new_rows)
-                    logger.info(f"Stream for {filename} was empty, wrote {rows_written} new rows")
-                    return (0, 0, rows_written)
-
-                # Verify column compatibility
-                if header[0] != primary_col:
-                    logger.warning(
-                        f"Existing file {filename} has incompatible columns "
-                        f"(expected {primary_col}, got {header[0]}), starting fresh"
-                    )
-                    writer.writerows(new_rows.values())
-                    rows_written = len(new_rows)
-                    return (0, 0, rows_written)
-
-                # Stream existing rows, filtering out duplicates
-                batch = []
-                batch_size = 10000
-
-                for row in reader:
-                    original_count += 1
-                    if row and row[0] not in new_keys:
-                        batch.append(row)
-                        rows_written += 1
-                        if len(batch) >= batch_size:
-                            writer.writerows(batch)
-                            batch = []
-                    else:
-                        duplicates_updated += 1
-
-                # Write remaining batch
-                if batch:
-                    writer.writerows(batch)
-
-                # Write all new rows at end
-                writer.writerows(new_rows.values())
-                rows_written += len(new_rows)
-
-            # Verify bytes consumed against THIS response's Content-Length (truncation check)
-            if resp_content_length > 0 and adapter.bytes_consumed != resp_content_length:
-                # Genuine truncation within this response - delete partial output and retry
-                if os.path.exists(output_path):
-                    os.remove(output_path)
-                raise IOError(
-                    f"Stream truncated for {filename}: consumed {adapter.bytes_consumed} bytes, "
-                    f"response Content-Length was {resp_content_length}"
-                )
-
-            # Warn if file size changed between metadata check and streaming response
-            if (expected_size > 0 and resp_content_length > 0
-                    and resp_content_length != expected_size):
-                logger.warning(
-                    f"File {filename} size changed between metadata check and stream: "
-                    f"metadata={expected_size}, response={resp_content_length} "
-                    f"(possible concurrent write)"
-                )
-
-            logger.info(
-                f"Stream-merged {filename}: {original_count} existing + {len(new_rows)} new = "
-                f"{rows_written} total ({duplicates_updated} duplicates updated)"
-            )
-            return (original_count, duplicates_updated, rows_written)
-
-        except Exception as e:
-            # Clean up partial output on failure
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            logger.warning(f"Stream-merge attempt {attempt} failed for {filename}: {e}")
-            if attempt == max_retries:
-                raise AnomaliFunctionError(
-                    f"Stream-merge failed for {filename} after {max_retries} retries: {e}"
-                ) from e
-
-    # Should not reach here, but satisfy linter
-    raise AnomaliFunctionError(f"Stream-merge failed for {filename} after {max_retries} retries")
-
-
 def clear_collection_data(
         custom_storage: CustomStorage, logger: Logger
 ):
@@ -1260,15 +1110,19 @@ def process_iocs_to_csv(
         rows_written = 0
 
         if isinstance(existing_file_info, int) and existing_file_info != 0 and repository:
-            # Stream-merge path: existing_file_info is Content-Length (int)
-            # Stream directly from NGSIEM without downloading to disk
-            if existing_file_info > 0:
-                logger.info(f"Using stream-merge for {filename} ({existing_file_info:,} bytes from NGSIEM)")
-            else:
-                logger.info(f"Using stream-merge for {filename} (size unknown, streaming from NGSIEM)")
-            original_count, duplicates_updated, rows_written = stream_merge_from_ngsiem(
-                repository, filename, filepath, columns, new_rows, existing_file_info, logger
+            # Server-side merge path: write only new rows to /tmp.
+            # Deduplication will happen server-side via update_lookup_file_entries().
+            # This avoids downloading the full existing file, preventing /tmp OOM.
+            logger.info(
+                f"Writing {len(new_rows)} new rows for {filename} "
+                f"(server-side dedup via update_lookup_file_entries, "
+                f"existing file: {existing_file_info:,} bytes)"
             )
+            with open(filepath, 'w', newline='', encoding='utf-8') as outfile:
+                writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
+                writer.writerow(columns)
+                writer.writerows(new_rows.values())
+                rows_written = len(new_rows)
         else:
             # Disk-based merge path: existing_file_info is a file path (str) or None
             existing_file_path = existing_file_info if isinstance(existing_file_info, str) else None
@@ -1333,13 +1187,10 @@ def process_iocs_to_csv(
 
         # SAFETY CHECK: If existing file was present, verify new file isn't dramatically smaller
         # This prevents data loss if something went wrong during download or processing
-        if existing_file_info:
-            if isinstance(existing_file_info, int):
-                # Stream-merge mode: compare against Content-Length
-                existing_size = existing_file_info
-            else:
-                # Disk-based mode: compare against file on disk
-                existing_size = os.path.getsize(existing_file_info) if os.path.exists(existing_file_info) else 0
+        # Skip this check for server-side update path (int) since we only write new rows
+        if existing_file_info and not isinstance(existing_file_info, int):
+            # Disk-based mode: compare against file on disk
+            existing_size = os.path.getsize(existing_file_info) if os.path.exists(existing_file_info) else 0
 
             # If new file is less than 10% of existing file size, something is wrong
             # (unless existing file was tiny, i.e., < 10KB)
@@ -1371,7 +1222,12 @@ def process_iocs_to_csv(
                 f"Consider using filters to reduce data volume."
             )
 
-        if existing_file_info:
+        if existing_file_info and isinstance(existing_file_info, int):
+            logger.info(
+                f"Prepared {len(new_rows)} new rows for server-side update of {filename} "
+                f"({file_size_mb:.2f} MB batch, existing file: {existing_file_info:,} bytes)"
+            )
+        elif existing_file_info:
             logger.info(
                 f"Merged {original_count} existing + {len(new_rows)} new = "
                 f"{rows_written} total records for {filename} "
@@ -1384,13 +1240,147 @@ def process_iocs_to_csv(
 
     return created_files, stats
 
-def upload_csv_files_to_ngsiem(csv_files: List[str], repository: str, logger: Logger) -> List[Dict]:
-    """Upload CSV files to Falcon Next-Gen SIEM as lookup files or write locally in test mode"""
+def upload_entries_to_ngsiem(
+        csv_files: List[str], repository: str,  # pylint: disable=unused-argument
+        existing_files: Dict[str, Union[str, int]], logger: Logger
+) -> List[Dict]:
+    """Upload new IOC rows using update_lookup_file_entries() for server-side deduplication.
+
+    This avoids downloading and re-uploading the full lookup file, preventing /tmp OOM
+    when existing files are large (200 MB+). The NGSIEM API handles deduplication
+    server-side using the key column (columns[0] for each IOC type).
+
+    For existing files: uses update_mode="update" (match on key column, replace row).
+    For new files: uses update_mode="append" to create and populate.
+
+    Args:
+        csv_files: List of CSV file paths containing only new rows (with header)
+        repository: NGSIEM repository name
+        existing_files: Dict of filename -> Content-Length (int) or file path (str)
+        logger: Logger instance
+
+    Returns:
+        List of result dicts with file, status, and message keys
+    """
+    ngsiem = NGSIEM()
+    results = []
+    max_retries = 5
+
+    for csv_file in csv_files:
+        filename = os.path.basename(csv_file)
+        try:
+            # Determine key column from IOC_TYPE_MAPPINGS
+            ioc_type = filename.replace("anomali_threatstream_", "").replace(".csv", "")
+            if ioc_type not in IOC_TYPE_MAPPINGS:
+                logger.warning(f"Unknown IOC type for file {filename}, skipping upload")
+                results.append({
+                    "file": filename,
+                    "status": "error",
+                    "message": f"Unknown IOC type: {ioc_type}"
+                })
+                continue
+
+            key_column = IOC_TYPE_MAPPINGS[ioc_type]["columns"][0]
+
+            with open(csv_file, 'rb') as f:
+                file_data = f.read()
+
+            file_size = len(file_data)
+            logger.info(
+                f"Uploading {filename} ({file_size:,} bytes) via update_lookup_file_entries "
+                f"(key_column={key_column})"
+            )
+
+            # Retry loop for 429/503 transient errors
+            status_code = 0
+            for attempt in range(1, max_retries + 1):
+                if isinstance(existing_files.get(filename), int):
+                    # Existing file: use update mode (match on key, replace row)
+                    response = ngsiem.update_lookup_file_entries(
+                        search_domain="all",
+                        filename=filename,
+                        file=file_data,
+                        update_mode="update",
+                        key_columns=key_column,
+                        ignore_case="false"
+                    )
+                else:
+                    # New file: use append mode
+                    response = ngsiem.update_lookup_file_entries(
+                        search_domain="all",
+                        filename=filename,
+                        file=file_data,
+                        update_mode="append"
+                    )
+
+                status_code = response.get("status_code", 0) if isinstance(response, dict) else 0
+
+                if status_code not in (429, 503):
+                    break  # Not a retryable error, proceed to response handling
+
+                # 429/503: exponential backoff and retry
+                backoff = min(5 * (2 ** (attempt - 1)), 60)
+                logger.warning(
+                    f"Retryable error (HTTP {status_code}) uploading {filename}, "
+                    f"retrying in {backoff}s (attempt {attempt}/{max_retries})"
+                )
+                time.sleep(backoff)
+            else:
+                # Exhausted all retries
+                raise AnomaliFunctionError(
+                    f"Upload failed for {filename} with HTTP {status_code} "
+                    f"after {max_retries} retries"
+                )
+
+            # Log the raw response for troubleshooting
+            logger.info(f"update_lookup_file_entries response for {filename}: {response}")
+
+            # Handle response
+            if 200 <= status_code < 300:
+                results.append({
+                    "file": filename,
+                    "status": "success",
+                    "message": "Entries updated successfully via update_lookup_file_entries"
+                })
+            else:
+                error_messages = response.get("body", {}).get("errors", []) if isinstance(response, dict) else []
+                error_msg = (
+                    f"update_lookup_file_entries failed for {filename} "
+                    f"(HTTP {status_code}): {error_messages}"
+                )
+                logger.error(error_msg)
+                raise AnomaliFunctionError(error_msg)
+
+        except AnomaliFunctionError:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating entries for {filename}: {str(e)}", exc_info=True)
+            raise AnomaliFunctionError(
+                f"Failed to update lookup file entries for {filename}: {e}"
+            ) from e
+
+    return results
+
+def upload_csv_files_to_ngsiem(
+        csv_files: List[str], repository: str, logger: Logger,
+        existing_files: Optional[Dict[str, Union[str, int]]] = None
+) -> List[Dict]:
+    """Upload CSV files to Falcon Next-Gen SIEM as lookup files or write locally in test mode.
+
+    When existing_files is provided and contains int values (production mode),
+    uses update_lookup_file_entries() for server-side deduplication instead of
+    uploading full merged files.
+    """
     # Check if we're in test mode
     test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
 
     if test_mode:
         return upload_csv_files_locally(csv_files, repository, logger)
+
+    # Use server-side update when existing files are present (production stream path)
+    if existing_files:
+        return upload_entries_to_ngsiem(csv_files, repository, existing_files, logger)
+
     return upload_csv_files_to_ngsiem_actual(csv_files, repository, logger)
 
 def upload_csv_files_locally(csv_files: List[str], repository: str, logger: Logger) -> List[Dict]:
@@ -2013,7 +2003,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 # Phase 4: Upload CSV files to Falcon Next-Gen SIEM
                 phase4_start = time.time()
                 logger.info("Phase 4: Uploading CSV files to NGSIEM...")
-                upload_results = upload_csv_files_to_ngsiem(csv_files, repository, logger)
+                upload_results = upload_csv_files_to_ngsiem(csv_files, repository, logger, existing_files=existing_files)
 
                 phase4_elapsed = time.time() - phase4_start
                 logger.info(f"Phase 4 complete: Uploaded {len(csv_files)} files in {format_elapsed_time(phase4_elapsed)}")
