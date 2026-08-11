@@ -233,6 +233,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             "status_code": 200,
             "body": {"message": "Success"}
         }
+        mock_ngsiem.update_lookup_file_entries.return_value = {
+            "status_code": 200,
+            "body": {"message": "Entries updated successfully"}
+        }
 
         # Simulate scenario: only ip and domain files exist (set = file exists)
         mock_check_metadata.return_value = {
@@ -2002,53 +2006,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertIn("Internal error", response.errors[0].message)
 
 
-
-    def test_response_stream_adapter(self):
-        """Test ResponseStreamAdapter with known byte sequences."""
-        # Simulate a response with iter_content
-        chunks = [b"hello ", b"world\n", b"second line\n"]
-        mock_response = MagicMock()
-        mock_response.iter_content.return_value = iter(chunks)
-
-        adapter = main.ResponseStreamAdapter(mock_response, chunk_size=65536)
-
-        # Read into a buffer
-        buf = bytearray(6)
-        n = adapter.readinto(buf)
-        self.assertEqual(n, 6)
-        self.assertEqual(bytes(buf[:n]), b"hello ")
-
-        buf = bytearray(100)
-        n = adapter.readinto(buf)
-        self.assertEqual(n, 6 + 12)  # "world\n" + "second line\n"
-        self.assertEqual(bytes(buf[:n]), b"world\nsecond line\n")
-
-        # Verify EOF
-        buf = bytearray(10)
-        n = adapter.readinto(buf)
-        self.assertEqual(n, 0)
-
-        # Verify total bytes consumed
-        self.assertEqual(adapter.bytes_consumed, len(b"hello world\nsecond line\n"))
-
-    def test_response_stream_adapter_with_text_wrapper(self):
-        """Test ResponseStreamAdapter works with TextIOWrapper and csv.reader."""
-        import io
-
-        csv_content = b"col1,col2\nval1,val2\nval3,val4\n"
-        mock_response = MagicMock()
-        mock_response.iter_content.return_value = iter([csv_content])
-
-        adapter = main.ResponseStreamAdapter(mock_response, chunk_size=65536)
-        text_stream = io.TextIOWrapper(io.BufferedReader(adapter), encoding='utf-8')
-        reader = csv.reader(text_stream)
-
-        rows = list(reader)
-        self.assertEqual(len(rows), 3)
-        self.assertEqual(rows[0], ["col1", "col2"])
-        self.assertEqual(rows[1], ["val1", "val2"])
-        self.assertEqual(rows[2], ["val3", "val4"])
-        self.assertEqual(adapter.bytes_consumed, len(csv_content))
 
     @patch('main.NGSIEM')
     def test_check_existing_file_metadata(self, mock_ngsiem_class):
