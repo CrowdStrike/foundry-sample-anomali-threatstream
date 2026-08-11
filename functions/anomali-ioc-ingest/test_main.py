@@ -2362,7 +2362,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             csv_path = os.path.join(temp_dir, "anomali_threatstream_domain.csv")
             with open(csv_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-                writer.writerow(["dns.domain.name", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"])
+                columns = ["dns.domain.name", "confidence", "threat_type", "severity", "source", "tags", "expiration_ts"]
+                writer.writerow(columns)
                 writer.writerow(["evil.com", "95", "c2", "critical", "feed1", "", "2026-01-01"])
 
             results = main.upload_entries_to_ngsiem(
@@ -2446,7 +2447,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
     @patch('main.time.sleep')
     @patch('main.NGSIEM')
-    def test_upload_entries_to_ngsiem_429_exhausted(self, mock_ngsiem_class, mock_sleep):
+    def test_upload_entries_to_ngsiem_429_exhausted(self, mock_ngsiem_class, mock_sleep):  # pylint: disable=unused-argument
         """Test upload_entries_to_ngsiem raises after exhausting 429 retries."""
         mock_ngsiem = MagicMock()
         mock_ngsiem_class.return_value = mock_ngsiem

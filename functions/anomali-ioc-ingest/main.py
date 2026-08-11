@@ -1178,9 +1178,8 @@ def upload_entries_to_ngsiem(
             with open(csv_file, 'rb') as f:
                 file_data = f.read()
 
-            file_size = len(file_data)
             logger.info(
-                f"Uploading {filename} ({file_size:,} bytes) via update_lookup_file_entries "
+                f"Uploading {filename} ({len(file_data):,} bytes) via update_lookup_file_entries "
                 f"(key_column={key_column})"
             )
 
