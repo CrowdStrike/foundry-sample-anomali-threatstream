@@ -50,6 +50,7 @@ auth:
         - humio-auth-proxy:write
         - humio-auth-proxy:read
         - ngsiem-lookup-files:write
+        - ngsiem-lookup-files:read
     permissions: {}
     roles: []
 functions:
@@ -86,10 +87,6 @@ workflows:
     - id: ""
       name: Anomali Threat Intelligence Ingest
       path: workflows/Anomali_Threat_Intelligence_Ingest.yml
-      permissions: []
-    - id: ""
-      name: Anomali Threat Intelligence Ingest Parallel
-      path: workflows/Anomali_Threat_Intelligence_Ingest_Parallel.yml
       permissions: []
 parsers: []
 logscale:

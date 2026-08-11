@@ -208,14 +208,13 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertIn('definition_id="Anomali API"', content,
                      "Should use descriptive definition_id='Anomali API'")
 
-    @patch.dict(os.environ, {"TEST_MODE": "true"})
     @patch('main.APIIntegrations')
     @patch('main.CustomStorage')
-    @patch('main.download_existing_lookup_files')
+    @patch('main.check_existing_file_metadata')
     @patch('main.clear_update_id_for_type')
     @patch('main.NGSIEM')
     def test_missing_file_recovery_scenario(self, mock_ngsiem_class, mock_clear_update_id,
-                                          mock_download_files, mock_custom_storage_class,
+                                          mock_check_metadata, mock_custom_storage_class,
                                           mock_api_integrations_class):
         """Test missing file recovery only clears update_ids for previously tracked types."""
         from crowdstrike.foundry.function import Request
@@ -235,10 +234,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             "body": {"message": "Success"}
         }
 
-        # Simulate scenario: only ip and domain files exist
-        mock_download_files.return_value = {
-            "anomali_threatstream_ip.csv": "existing,data\n1.2.3.4,90",
-            "anomali_threatstream_domain.csv": "existing,data\nevil.com,95"
+        # Simulate scenario: only ip and domain files exist (set = file exists)
+        mock_check_metadata.return_value = {
+            "anomali_threatstream_ip.csv",
+            "anomali_threatstream_domain.csv"
             # Missing: url, email, hash_md5, hash_sha1, hash_sha256 files
         }
 
@@ -525,7 +524,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         # Test with existing file that has invalid CSV data
         existing_files = {
-            "anomali_threatstream_ip.csv": "invalid,csv,data\nno,proper,structure"
+            "anomali_threatstream_ip.csv"
         }
 
         iocs = [
@@ -1125,7 +1124,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 f.write("1.2.3.4,95,existing,,original,tag1,2024-12-31T23:59:59Z\n")
 
             existing_files = {
-                "anomali_threatstream_ip.csv": existing_file_path
+                "anomali_threatstream_ip.csv"
             }
 
             csv_files, stats = main.process_iocs_to_csv(new_iocs, temp_dir, existing_files, mock_logger)
@@ -1309,29 +1308,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             json_response = json.dumps(response.body)
             self.assertNotIn('"next"', json_response)
 
-    @patch('main.NGSIEM')
-    def test_download_existing_lookup_files_hash_mapping(self, mock_ngsiem_class):
-        """Test download_existing_lookup_files with hash type mapping."""
-        mock_ngsiem = MagicMock()
-        mock_ngsiem_class.return_value = mock_ngsiem
-        mock_logger = MagicMock()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Test md5 type mapping - return 404 dict for file not found
-            mock_ngsiem.get_file.return_value = {"status_code": 404}
-            result = main.download_existing_lookup_files("search-all", "md5", temp_dir, mock_logger)
-            self.assertEqual(result, {})
-            # Check that md5 was mapped to hash_md5
-            call_args_list = [call[1]['filename'] for call in mock_ngsiem.get_file.call_args_list]
-            self.assertIn("anomali_threatstream_hash_md5.csv", call_args_list)
-            mock_ngsiem.reset_mock()
-
-            # Test sha1 type mapping
-            mock_ngsiem.get_file.return_value = {"status_code": 404}
-            result = main.download_existing_lookup_files("search-all", "sha1", temp_dir, mock_logger)
-            # Note: sha1 and sha256 are not currently mapped in the function, test what actually happens
-            self.assertEqual(result, {})
-
     def test_extract_next_token_from_meta_variations(self):
         """Test extract_next_token_from_meta with different URL parameter variations."""
         mock_logger = MagicMock()
@@ -1435,25 +1411,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertEqual(result["type"], "ip")
         self.assertEqual(result["status"], "active")
 
-    def test_download_existing_lookup_files_multiple_types(self):
-        """Test download_existing_lookup_files with hash type handling."""
-        mock_logger = MagicMock()
-
-        with patch('main.NGSIEM') as mock_ngsiem_class:
-            mock_ngsiem = MagicMock()
-            mock_ngsiem_class.return_value = mock_ngsiem
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Test "hash" type downloads all hash types - return 404 dict for file not found
-                mock_ngsiem.get_file.return_value = {"status_code": 404}
-                result = main.download_existing_lookup_files("search-all", "hash", temp_dir, mock_logger)
-
-                # Should attempt to download md5, sha1, sha256 hash files
-                call_args_list = [call[1]['filename'] for call in mock_ngsiem.get_file.call_args_list]
-                hash_files = [f for f in call_args_list if 'hash' in f]
-                self.assertGreater(len(hash_files), 0)
-                self.assertEqual(result, {})
-
     def test_create_job_error_handling(self):
         """Test create_job with PutObject failure."""
         mock_api_client = MagicMock()
@@ -1505,24 +1462,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             with self.assertRaises(main.APIIntegrationError):
                 # Should re-raise APIIntegrationError without retry
                 main.fetch_iocs_from_anomali(mock_api_integrations, {}, mock_logger, max_retries=0)
-
-    def test_download_existing_lookup_files_specific_type_filters(self):
-        """Test download_existing_lookup_files with specific type filters beyond hash."""
-        mock_logger = MagicMock()
-
-        with patch('main.NGSIEM') as mock_ngsiem_class:
-            mock_ngsiem = MagicMock()
-            mock_ngsiem_class.return_value = mock_ngsiem
-            # Mock that no existing files are found (return 404 dict)
-            mock_ngsiem.get_file.return_value = {"status_code": 404}
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Test sha1 and sha256 specific types (these don't map to anything currently)
-                result_sha1 = main.download_existing_lookup_files("search-all", "sha1", temp_dir, mock_logger)
-                result_sha256 = main.download_existing_lookup_files("search-all", "sha256", temp_dir, mock_logger)
-
-                self.assertEqual(result_sha1, {})
-                self.assertEqual(result_sha256, {})
 
     def test_clear_update_id_for_type_success(self):
         """Test clear_update_id_for_type successful deletion."""
@@ -1623,7 +1562,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         # Existing file with truly invalid CSV content that will cause csv reader to fail
         existing_files = {
-            "anomali_threatstream_ip.csv": "invalid\x00binary\x01content\x02"
+            "anomali_threatstream_ip.csv"
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1831,27 +1770,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         self.assertNotIn("severity", result)
 
-    def test_download_existing_lookup_files_unexpected_response(self):
-        """Test download_existing_lookup_files with unexpected response types."""
-        mock_logger = MagicMock()
-
-        with patch('main.NGSIEM') as mock_ngsiem_class:
-            mock_ngsiem = MagicMock()
-            mock_ngsiem_class.return_value = mock_ngsiem
-
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Test with unexpected response type (not bytes, dict with status, or streaming response)
-                # An unexpected response (like an integer) will result in an empty file being created
-                # since it has no iter_content method and isn't bytes
-                mock_ngsiem.get_file.return_value = 12345  # Unexpected integer response
-
-                result = main.download_existing_lookup_files("search-all", "ip", temp_dir, mock_logger)
-
-                # Should return a file path (empty file was "successfully" downloaded)
-                # This is an edge case - in practice, FalconPy will return proper response types
-                self.assertEqual(len(result), 1)
-                self.assertIn("anomali_threatstream_ip.csv", result)
-
     def test_fetch_iocs_multi_status_rate_limit(self):
         """Test fetch_iocs_from_anomali with 207 multi-status containing 429 rate limit."""
         mock_api_integrations = MagicMock()
@@ -2001,81 +1919,6 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_logger.info.assert_called_with("TEST MODE: Mock job update for test-job-123 with state: completed")
 
     @patch.dict(os.environ, {'TEST_MODE': 'true'})
-    def test_download_existing_lookup_files_locally(self):
-        """Test download_existing_lookup_files_locally functionality (lines 576-640)."""
-        mock_logger = MagicMock()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create test output directory structure
-            test_output_dir = os.path.join(temp_dir, "test_output", "search-all")
-            os.makedirs(test_output_dir, exist_ok=True)
-
-            # Create some test lookup files
-            ip_csv = (
-                "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
-                "1.2.3.4,90,malware,high,test,tag1,2024-12-31T23:59:59Z\n"
-            )
-            domain_csv = (
-                "dns.domain.name,confidence,threat_type,severity,source,tags,expiration_ts\n"
-                "evil.com,85,phishing,medium,test,tag2,2024-12-31T23:59:59Z\n"
-            )
-            test_files = {
-                "anomali_threatstream_ip.csv": ip_csv,
-                "anomali_threatstream_domain.csv": domain_csv
-            }
-
-            for filename, content in test_files.items():
-                with open(os.path.join(test_output_dir, filename), 'w', encoding='utf-8') as f:
-                    f.write(content)
-
-            # Create a destination temp_dir for downloads
-            with tempfile.TemporaryDirectory() as download_dir:
-                # Mock os.getcwd to return our temp directory
-                with patch('os.getcwd', return_value=temp_dir):
-                    # Test downloading all files (no type filter)
-                    result = main.download_existing_lookup_files_locally("search-all", None, download_dir, mock_logger)
-
-                    # Should find both files (now returns file PATHS, not content)
-                    self.assertEqual(len(result), 2)
-                    self.assertIn("anomali_threatstream_ip.csv", result)
-                    self.assertIn("anomali_threatstream_domain.csv", result)
-                    # Verify files were copied to download_dir
-                    self.assertTrue(os.path.exists(result["anomali_threatstream_ip.csv"]))
-                    self.assertTrue(result["anomali_threatstream_ip.csv"].endswith(".csv"))
-
-                    # Test with specific type filter
-                    result_ip = main.download_existing_lookup_files_locally("search-all", "ip", download_dir, mock_logger)
-
-                    # Should find only IP file
-                    self.assertEqual(len(result_ip), 1)
-                    self.assertIn("anomali_threatstream_ip.csv", result_ip)
-                    self.assertNotIn("anomali_threatstream_domain.csv", result_ip)
-
-                    # Test with hash type (should look for hash_md5, hash_sha1, hash_sha256)
-                    result_hash = main.download_existing_lookup_files_locally(
-                        "search-all", "hash", download_dir, mock_logger
-                    )
-
-                    # Should find no hash files (we didn't create any)
-                    self.assertEqual(len(result_hash), 0)
-
-                    # Test with md5 type mapping
-                    result_md5 = main.download_existing_lookup_files_locally(
-                        "search-all", "md5", download_dir, mock_logger
-                    )
-
-                    # Should find no md5 files (we didn't create any)
-                    self.assertEqual(len(result_md5), 0)
-
-                    # Test with non-existent type
-                    result_unknown = main.download_existing_lookup_files_locally(
-                        "search-all", "unknown", download_dir, mock_logger
-                    )
-
-                    # Should find no files
-                    self.assertEqual(len(result_unknown), 0)
-
-    @patch.dict(os.environ, {'TEST_MODE': 'true'})
     def test_upload_csv_files_locally(self):
         """Test upload_csv_files_locally functionality (lines 960-998)."""
         mock_logger = MagicMock()
@@ -2209,25 +2052,23 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
     @patch('main.NGSIEM')
     def test_check_existing_file_metadata(self, mock_ngsiem_class):
-        """Test check_existing_file_metadata returns correct filename->size mapping."""
+        """Test check_existing_file_metadata returns correct filename->exists mapping."""
         mock_ngsiem = MagicMock()
         mock_ngsiem_class.return_value = mock_ngsiem
         mock_logger = MagicMock()
 
-        # Mock responses: ip exists (200), domain not found (404)
-        mock_resp_ip = MagicMock()
-        mock_resp_ip.status_code = 200
-        mock_resp_ip.headers = {"Content-Length": "1048576"}
-
-        mock_resp_domain = MagicMock()
-        mock_resp_domain.status_code = 404
-
-        mock_ngsiem.get_file.side_effect = [mock_resp_ip, mock_resp_domain]
+        # Mock list_lookup_files response: ip file exists
+        mock_ngsiem.list_lookup_files.return_value = {
+            "status_code": 200,
+            "body": {
+                "resources": ["anomali_threatstream_ip.csv"]
+            }
+        }
 
         result = main.check_existing_file_metadata("search-all", "ip", mock_logger)
 
-        self.assertEqual(result, {"anomali_threatstream_ip.csv": 1048576})
-        self.assertEqual(mock_ngsiem.get_file.call_count, 1)  # Only 1 file for type "ip"
+        self.assertEqual(result, {"anomali_threatstream_ip.csv"})
+        self.assertEqual(mock_ngsiem.list_lookup_files.call_count, 1)
 
     @patch('main.NGSIEM')
     def test_check_existing_file_metadata_hash_type(self, mock_ngsiem_class):
@@ -2236,30 +2077,38 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         mock_ngsiem_class.return_value = mock_ngsiem
         mock_logger = MagicMock()
 
-        # Mock responses: md5 exists, sha1 exists, sha256 not found
-        mock_resp_md5 = MagicMock()
-        mock_resp_md5.status_code = 200
-        mock_resp_md5.headers = {"Content-Length": "500000"}
-
-        mock_resp_sha1 = MagicMock()
-        mock_resp_sha1.status_code = 200
-        mock_resp_sha1.headers = {"Content-Length": "600000"}
-
-        mock_resp_sha256 = MagicMock()
-        mock_resp_sha256.status_code = 404
-
-        mock_ngsiem.get_file.side_effect = [mock_resp_md5, mock_resp_sha1, mock_resp_sha256]
+        # Mock list_lookup_files responses for each hash file
+        mock_ngsiem.list_lookup_files.side_effect = [
+            {
+                "status_code": 200,
+                "body": {
+                    "resources": ["anomali_threatstream_hash_md5.csv"]
+                }
+            },
+            {
+                "status_code": 200,
+                "body": {
+                    "resources": ["anomali_threatstream_hash_sha1.csv"]
+                }
+            },
+            {
+                "status_code": 200,
+                "body": {
+                    "resources": []  # sha256 not found
+                }
+            }
+        ]
 
         result = main.check_existing_file_metadata("search-all", "hash", mock_logger)
 
         self.assertEqual(result, {
-            "anomali_threatstream_hash_md5.csv": 500000,
-            "anomali_threatstream_hash_sha1.csv": 600000
+            "anomali_threatstream_hash_md5.csv",
+            "anomali_threatstream_hash_sha1.csv"
         })
 
     @patch('main.NGSIEM')
     def test_stream_merge_removed_uses_server_side_update(self, mock_ngsiem_class):
-        """Test that when existing_files values are ints, only new rows are written to CSV.
+        """Test that when existing_files contains a filename, only new rows are written to CSV.
 
         Server-side deduplication via update_lookup_file_entries() replaces the old
         stream-merge approach. The CSV file should contain only new rows (not existing).
@@ -2281,9 +2130,9 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             }
         ]
 
-        # existing_files with int value (Content-Length) triggers server-side update path
+        # existing_files with filename in set triggers server-side update path
         existing_files = {
-            "anomali_threatstream_ip.csv": 1000
+            "anomali_threatstream_ip.csv"
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2317,7 +2166,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         }
 
         existing_files = {
-            "anomali_threatstream_ip.csv": 1048576
+            "anomali_threatstream_ip.csv"
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2355,8 +2204,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             "body": {"message": "success"}
         }
 
-        # File not in existing_files dict → it's a new file
-        existing_files = {}
+        # File not in existing_files set → it's a new file
+        existing_files = set()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = os.path.join(temp_dir, "anomali_threatstream_domain.csv")
@@ -2393,7 +2242,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         }
 
         existing_files = {
-            "anomali_threatstream_ip.csv": 1048576
+            "anomali_threatstream_ip.csv"
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2425,7 +2274,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             {"status_code": 200, "body": {"message": "success"}},
         ]
 
-        existing_files = {"anomali_threatstream_ip.csv": 1048576}
+        existing_files = {"anomali_threatstream_ip.csv"}
 
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = os.path.join(temp_dir, "anomali_threatstream_ip.csv")
@@ -2459,7 +2308,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             "body": {"errors": [{"message": "rate limited"}]}
         }
 
-        existing_files = {"anomali_threatstream_ip.csv": 1048576}
+        existing_files = {"anomali_threatstream_ip.csv"}
 
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = os.path.join(temp_dir, "anomali_threatstream_ip.csv")

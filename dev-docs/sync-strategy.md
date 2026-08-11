@@ -1,6 +1,6 @@
 # Anomali NGSIEM Connector Sync Strategy
 
-The Anomali NGSIEM connector performs **incremental/delta sync** with **parallel per-type processing**, not full download and replace. Two workflow options are available: a **parallel workflow** (default, `provision_on_install: true`) that processes all 5 IOC types concurrently, and a **sequential workflow** that processes types one at a time. Both use **server-side deduplication** in production — existing lookup files are never downloaded to `/tmp`; instead the function writes only new rows and uses the NGSIEM `update_lookup_file_entries()` API to merge and deduplicate server-side.
+The Anomali NGSIEM connector performs **incremental/delta sync** with **parallel per-type processing**, not full download and replace. The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) processes all 5 IOC types concurrently with independent pagination loops. It uses **server-side deduplication** in production — existing lookup files are never downloaded to `/tmp`; instead the function writes only new rows and uses the NGSIEM `update_lookup_file_entries()` API to merge and deduplicate server-side.
 
 ## Architecture Overview
 
@@ -8,7 +8,9 @@ The Anomali NGSIEM connector performs **incremental/delta sync** with **parallel
 flowchart TD
     Start["<b>Workflow Start</b><br/>Triggered hourly or manually"]
 
-    Start --> InitCheck["<b>Initial Call Check</b><br/>next_token present?"]
+    Start --> CheckMeta["<b>Phase 1: Check File Metadata</b><br/>list_lookup_files() API<br/>No download to /tmp"]
+
+    CheckMeta --> InitCheck["<b>Initial Call Check</b><br/>next_token present?"]
 
     InitCheck -->|No| CreateJob["<b>Create Job Record</b><br/>Generate UUID<br/>Type-specific ID"]
     InitCheck -->|Yes| SkipJob["<b>Skip Job Creation</b><br/>Pagination call"]
@@ -23,11 +25,9 @@ flowchart TD
 
     Parse --> HasData{"<b>IOCs Returned?</b>"}
 
-    HasData -->|No| Return0["<b>Return next: 0</b><br/>Terminate workflow"]
+    HasData -->|No| Return0["<b>Return (no next field)</b><br/>Terminate workflow"]
 
-    HasData -->|Yes| CheckMeta["<b>Check File Metadata</b><br/>Streaming GET for Content-Length<br/>No download to /tmp"]
-
-    CheckMeta --> WriteNew["<b>Write New Rows to /tmp</b><br/>CSV with header + new IOCs only<br/>No existing data downloaded"]
+    HasData -->|Yes| WriteNew["<b>Write New Rows to /tmp</b><br/>CSV with header + new IOCs only<br/>No existing data downloaded"]
 
     WriteNew --> Upload["<b>Server-Side Update</b><br/>update_lookup_file_entries()<br/>update_mode=update, key_columns=primary"]
 
@@ -39,11 +39,11 @@ flowchart TD
 
     ExtractToken --> ReturnNext["<b>Return next: token</b><br/>Workflow continues"]
 
-    SaveState --> Return0Final["<b>Return next: 0</b><br/>Workflow terminates"]
+    SaveState --> Return0Final["<b>Return (no next field)</b><br/>Workflow terminates"]
 
-    ReturnNext --> WorkflowLoop["<b>Workflow Loop</b><br/>Check: next != 0"]
+    ReturnNext --> WorkflowLoop["<b>Workflow Loop</b><br/>Check: next != null"]
 
-    WorkflowLoop --> InitCheck
+    WorkflowLoop --> Start
 
     Return0 --> End["<b>Workflow Complete</b>"]
     Return0Final --> End
@@ -74,6 +74,11 @@ flowchart TD
 
 The diagram above illustrates the complete pagination flow for a single IOC type. Here's how the components work together:
 
+### Phase 1: File Existence Check (Always First)
+1. **Metadata Check**: Calls `ngsiem.list_lookup_files(filter=...)` to determine which lookup files already exist — no file content is downloaded
+2. **Missing File Recovery**: If a previously-tracked file is missing, clears its `update_id` to trigger a fresh start for that type
+3. **Fresh Start Detection**: If no files exist at all, clears all collection data
+
 ### Initial Call (No next_token)
 1. **Job Creation**: Creates a unique job record with type-specific ID (e.g., `{uuid}_ip`)
 2. **State Retrieval**: Fetches last saved `update_id` from collections (e.g., `last_update_ip`)
@@ -88,14 +93,14 @@ The diagram above illustrates the complete pagination flow for a single IOC type
 ### Data Processing (Server-Side Deduplication)
 
 In **production mode**, the function never downloads existing lookup files to `/tmp`. Instead:
-1. **Metadata Check**: Issues a streaming GET to NGSIEM, extracts `Content-Length` header, and closes the connection immediately — no body downloaded
+1. **Metadata Check**: Calls `ngsiem.list_lookup_files(filter=...)` to check if the file exists in the resources list — no file content is downloaded
 2. **Write New Rows Only**: Creates a CSV in `/tmp` containing only the new IOC rows (with header). No existing data is downloaded or merged locally.
 3. **Server-Side Update**: Calls `update_lookup_file_entries(update_mode="update", key_columns=<primary_field>)` which handles deduplication server-side — matching rows are replaced, new rows are appended.
 4. **Cleanup**: `gc.collect()` is called after processing to release memory
 
 For **new files** (no existing file in NGSIEM), uses `update_lookup_file_entries(update_mode="append")` to create and populate the file.
 
-In **test mode** (`TEST_MODE=true`), the disk-based download-then-merge behavior is preserved for local development — existing files are copied to `/tmp` and merged with new data locally.
+In **test mode** (`TEST_MODE=true`), files are written to a local `test_output/` directory instead of being uploaded to NGSIEM.
 
 ### Pagination Decision
 1. **Check meta.next**: If present, more data available
@@ -103,8 +108,8 @@ In **test mode** (`TEST_MODE=true`), the disk-based download-then-merge behavior
 3. **Return Token**: Returns `next: {token}` to workflow, which loops back for next page
 
 ### Termination Conditions
-1. **No IOCs**: API returns empty result set → Return `next: "0"`
-2. **No meta.next**: API indicates no more data → Save state, return `next: "0"`
+1. **No IOCs**: API returns empty result set → Omit `next` field from response (null terminates workflow)
+2. **No meta.next**: API indicates no more data → Save state, omit `next` field from response
 3. **Workflow timeout**: 2-hour execution timeout prevents runaway loops
 
 ## Production Performance
@@ -123,11 +128,10 @@ The server-side deduplication architecture eliminates the need to download or st
 ### Key Components
 
 **`check_existing_file_metadata(repository, ioc_type, logger)`**:
-- Issues a streaming GET to NGSIEM for each known lookup file
-- Extracts `Content-Length` from response headers
-- Closes the connection immediately without reading the body
-- Returns `Dict[str, int]` mapping filename → Content-Length (or -1 if chunked transfer encoding)
-- HTTP 404 responses indicate the file doesn't exist (not an error)
+- Calls `ngsiem.list_lookup_files(filter=...)` for each known lookup file
+- Checks if the filename appears in the response's `resources` list
+- Returns `Set[str]` of filenames that exist in NGSIEM
+- HTTP 404 / missing from resources indicates the file doesn't exist (not an error)
 - Retry logic: 5 attempts with exponential backoff (5s, 10s, 20s, 40s, 60s)
 
 **`upload_entries_to_ngsiem(csv_files, repository, existing_files, logger)`**:
@@ -139,32 +143,33 @@ The server-side deduplication architecture eliminates the need to download or st
 
 **`upload_csv_files_to_ngsiem(csv_files, repository, logger, existing_files)`**:
 - Router function that selects the upload strategy:
-  - Test mode → writes files to local `test_output/` directory
+  - Test mode → writes files to local `test_output/` directory via `upload_csv_files_locally()`
   - Production with existing files → `upload_entries_to_ngsiem()` (server-side dedup)
   - Production without existing files → `upload_csv_files_to_ngsiem_actual()` (full file upload)
 
-### Dual-Mode Processing
+### Upload Strategy Selection
 
-The `existing_files` dictionary uses `Union[str, int]` values to support both modes:
+The `upload_csv_files_to_ngsiem()` router selects the upload path based on environment and file existence:
 
-| Mode | `existing_files` value | Upload strategy |
-|------|----------------------|----------------|
-| Production (`TEST_MODE=false`) | `int` (Content-Length from metadata check) | `upload_entries_to_ngsiem()` — server-side dedup |
-| Test (`TEST_MODE=true`) | `str` (file path on disk) | Disk-based merge — reads from `/tmp`, merges locally |
+| Mode | Condition | Upload strategy |
+|------|-----------|----------------|
+| Test (`TEST_MODE=true`) | Any | `upload_csv_files_locally()` — writes to `test_output/` directory |
+| Production | `existing_files` is non-empty (`Set[str]`) | `upload_entries_to_ngsiem()` — server-side dedup |
+| Production | `existing_files` is empty | `upload_csv_files_to_ngsiem_actual()` — full file upload |
 
 ### Memory Profile
 
 - **Before** (download-then-merge): 2x file size in `/tmp` (downloaded + merged output)
-- **After** (server-side dedup): Only new rows in `/tmp` (~small batch) + no streaming buffer needed
+- **After** (server-side dedup): Only new rows in `/tmp` (~small batch) + lightweight list API call for existence checks
 - `gc.collect()` called after processing to release memory promptly
 
 ## Workflow Termination & Missing File Recovery
 
 ### Workflow Termination
-The function returns `"next": "0"` when pagination should stop. The workflow checks both that `next` exists AND is not equal to "0" before continuing to the next iteration.
+The function omits the `"next"` field from the response body when pagination should stop. The workflow checks both that `next` exists (is not null) AND is not equal to "0" before continuing to the next iteration.
 
 ### Missing File Recovery
-When a lookup file is deleted, the system detects this via the metadata check and triggers recovery:
+When a lookup file is deleted, the system detects this via the `list_lookup_files()` check and triggers recovery:
 - Only recovers files that were **previously tracked** (have a `last_update_{type}` entry in collections)
 - IOC types that never appeared in the feed are not considered "missing"
 - Clears type-specific keys (e.g., `last_update_ip`) for missing file types
@@ -192,9 +197,9 @@ The function supports multiple filtering parameters for both initial and paginat
 **Status Filter**:
 - `status`: IOC status filter (no default — retrieves all statuses unless specified)
 
-## Recommended: Parallel Processing Architecture (Default)
+## Parallel Processing Architecture
 
-**The parallel workflow (`Anomali_Threat_Intelligence_Ingest_Parallel.yml`) is the default production deployment** (`provision_on_install: true`). It processes all 5 IOC types concurrently with independent pagination loops.
+**The workflow (`Anomali_Threat_Intelligence_Ingest.yml`)** processes all 5 IOC types concurrently with independent pagination loops.
 
 **Workflow Execution**: The workflow creates per-type variables and launches 5 parallel branches simultaneously:
 - IP addresses (`type=ip`) → variable `next_ip`
@@ -208,8 +213,8 @@ The function supports multiple filtering parameters for both initial and paginat
 - **Variable update**: `${data['Ingest{Type}.FaaS.anomali-ioc-ingest.AnomaliIngest.next']}`
 - **Loop variable**: `${data['WorkflowCustomVariable.next_{type}']}`
 
-**Parallel Benefits**:
-- **Faster processing**: All 5 types process simultaneously instead of sequentially
+**Benefits**:
+- **Faster processing**: All 5 types process simultaneously
 - **Minimal /tmp usage**: Only new rows written to disk per type (no existing file download)
 - **Independent pagination**: Each type paginating independently prevents one slow type from blocking others
 - **Independent failure isolation**: A failure in one type does not affect the others
@@ -225,30 +230,6 @@ The function supports multiple filtering parameters for both initial and paginat
 - `last_update_email` - tracks email sync state
 - `last_update_hash` - tracks file hash sync state
 
-## Alternative: Sequential Processing Architecture
-
-**The sequential workflow (`Anomali_Threat_Intelligence_Ingest.yml`) is available for environments where rate limiting is a concern** (`provision_on_install: false`).
-
-**Sequential Workflow Execution**: A single action processes all IOC types internally without a `type` parameter. The function handles type iteration internally.
-
-**Sequential Benefits**:
-- **Perfect rate limiting**: 2s delays + sequential processing prevents API throttling
-- **Predictable performance**: Clearer progress tracking with single execution path
-- **Simpler workflow**: Single `next` variable and single pagination loop
-
-## Workflow Comparison
-
-| Aspect | Sequential | Parallel (Default) |
-|--------|-----------|-------------------|
-| File | `Anomali_Threat_Intelligence_Ingest.yml` | `Anomali_Threat_Intelligence_Ingest_Parallel.yml` |
-| `provision_on_install` | `false` | `true` |
-| Type handling | No `type` param — function handles internally | Explicit `type=ip/domain/url/email/hash` per action |
-| Pagination vars | Single `next` | Per-type: `next_ip`, `next_domain`, `next_url`, `next_email`, `next_hash` |
-| Parallelism | None — single action per iteration | 5 branches execute concurrently |
-| Variable update path | `AnomaliIngest.FaaS.anomali-ioc-ingest.AnomaliIngest.next` | `Ingest{Type}.FaaS.anomali-ioc-ingest.AnomaliIngest.next` |
-| Loop condition | `WorkflowCustomVariable.next:!null+...next:!'0'` | `WorkflowCustomVariable.next_{type}:!null+...next_{type}:!'0'` |
-| Upload strategy | Server-side dedup (same as parallel) | Server-side dedup — only new rows on disk |
-
 **Job Management**: Job creation optimized for workflow-managed pagination:
 - **Initial calls**: Create job record with type-specific ID: `{uuid}_ip`, `{uuid}_domain`, etc.
 - **Pagination calls**: Skip job creation entirely to reduce overhead while maintaining audit trail
@@ -263,11 +244,11 @@ The function supports multiple filtering parameters for both initial and paginat
 - Includes a 65-minute lookback buffer to ensure no data is missed between hourly workflow runs
 
 **Workflow Pagination Architecture**:
-- **Workflow-managed looping**: Workflow handles all pagination iteration logic with condition-based termination (loops until `next` is "0" or null)
+- **Workflow-managed looping**: Workflow handles all pagination iteration logic with condition-based termination (loops until `next` is null or "0")
 - **Function role**: Function processes single pages and returns `next` token when more data is available
 - **Initial calls**: Create jobs, use saved state, return data + next token for workflow to store
 - **Pagination calls**: Skip job creation, use workflow's `next_token` directly in API query
-- **Termination handling**: Function returns `"next": "0"` when no more data, workflow condition checks `!= "0"`
+- **Termination handling**: Function omits `"next"` field when no more data; workflow condition checks for null and "0"
 - **Cursor advancement**: Even when no supported IOC types produce CSV files, the cursor is advanced to avoid re-fetching the same page
 
 **Token Progression**: Parses the API's `meta.next` URL to extract the pagination cursor with the following priority order:
@@ -282,8 +263,8 @@ This prioritization ensures proper token advancement and prevents missing or dup
 
 ## Missing File Recovery
 
-**Automatic Detection**: Function detects when specific lookup files are missing via metadata checks and triggers recovery:
-- **File existence check**: In production, issues a streaming GET and checks for HTTP 404 (no download required). In test mode, checks for file presence on disk.
+**Automatic Detection**: Function detects when specific lookup files are missing via `list_lookup_files()` API and triggers recovery:
+- **File existence check**: Calls `ngsiem.list_lookup_files(filter=...)` and checks if the file appears in the response's resources list
 - **Previously tracked only**: Only considers a file "missing" if it has a `last_update_{type}` entry in collections — types that never appeared in the feed are ignored.
 - **Type-specific clearing**: Clears `last_update_{type}` keys for missing file types
 - **Fresh start trigger**: Missing files cause function to omit the cursor entirely (fresh start)
@@ -291,7 +272,7 @@ This prioritization ensures proper token advancement and prevents missing or dup
 
 **Recovery Process**:
 1. User deletes `anomali_threatstream_ip.csv`
-2. Next workflow run detects missing file (404 from metadata check + tracker entry exists)
+2. Next workflow run detects missing file (not in `list_lookup_files()` response + tracker entry exists)
 3. Function clears `last_update_ip` key
 4. API query omits the cursor (fresh start, returns from beginning)
 5. All IP IOCs fetched from beginning
@@ -301,7 +282,7 @@ This prioritization ensures proper token advancement and prevents missing or dup
 
 **Collection Data Management**:
 - **Fresh start**: Clears all type-specific trackers when no files exist
-- **Type-specific sync**: Checks metadata for existing lookup files filtered by type (no download)
+- **Type-specific sync**: Checks for existing lookup files via `list_lookup_files()` filtered by type (no download)
 - **Incremental updates**: Server-side dedup merges new data with existing CSV files per type
 - **Missing file recovery**: Automatically recreates deleted files
 
@@ -324,9 +305,9 @@ This prioritization ensures proper token advancement and prevents missing or dup
 - Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped at 60s)
 - Maximum 5 retries per file
 
-**File Metadata Check Retries**:
+**File Existence Check Retries**:
 - Same retry pattern as uploads (5 attempts, exponential backoff)
-- Aborts function if metadata check fails to prevent data loss
+- Aborts function if existence check fails to prevent data loss
 
 ## Benefits
 
@@ -348,7 +329,7 @@ This comprehensive solution provides:
 
 ## Production Deployment Strategy
 
-**Current Workflow Configuration**: The parallel workflow is the default (`provision_on_install: true`). It uses per-type `!= "0"` termination conditions with independent pagination loops:
+**Current Workflow Configuration**: The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) uses per-type null/`"0"` termination conditions with independent pagination loops:
 - **Condition expressions**: `WorkflowCustomVariable.next_{type}:!null+WorkflowCustomVariable.next_{type}:!'0'`
 - **Loop conditions**: Each type checks that its own `next_{type}` exists AND is not equal to "0"
 - **Variable updates** (per branch):
@@ -359,8 +340,7 @@ This comprehensive solution provides:
 
 **Current Implementation**:
 ```yaml
-# Parallel workflow (default)
-name: Anomali Threat Intelligence Ingest Parallel
+name: Anomali Threat Intelligence Ingest
 provision_on_install: true
 schedule: "0 0/1 * * *"    # Hourly execution
 skip_concurrent: true       # Prevent overlapping runs

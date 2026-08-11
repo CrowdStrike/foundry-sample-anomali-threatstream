@@ -23,7 +23,7 @@ Threat Intelligence Deduplication:
 Architecture:
 - Initial calls: Create jobs and fetch IOCs using saved update_id state
 - Pagination calls: Use workflow next_token to continue fetching remaining data
-- File processing: Download existing files, merge with new data, remove duplicates
+- File processing: Check existing file metadata, write new data, server-side deduplication
 - Progress tracking: Save latest update_id after each successful batch
 
 Workflow Integration:
@@ -42,7 +42,6 @@ Sync Logic:
 
 import csv
 import gc
-import io
 import json
 import os
 import random
@@ -52,7 +51,7 @@ import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from logging import Logger
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, List, Any, Optional, Set
 from urllib.parse import urlparse, parse_qs
 
 from crowdstrike.foundry.function import Function, Request, Response, APIError
@@ -78,45 +77,6 @@ class JobError(AnomaliFunctionError):
     """Exception for job management errors."""
 
 
-
-
-class ResponseStreamAdapter(io.RawIOBase):
-    """Adapts requests response iter_content() to a file-like binary stream for csv.reader."""
-
-    def __init__(self, response, chunk_size=65536):
-        self._iterator = response.iter_content(chunk_size=chunk_size)
-        self._leftover = b""
-        self._bytes_consumed = 0
-
-    def readable(self):
-        return True
-
-    def readinto(self, b):
-        buf_len = len(b)
-        # Fill from leftover first, then pull from iterator
-        data = self._leftover
-        while len(data) < buf_len:
-            try:
-                chunk = next(self._iterator)
-                if chunk:
-                    data += chunk
-            except StopIteration:
-                break
-
-        if not data:
-            return 0  # EOF
-
-        # Return up to buf_len bytes, save the rest
-        output = data[:buf_len]
-        self._leftover = data[buf_len:]
-        b[:len(output)] = output
-        self._bytes_consumed += len(output)
-        return len(output)
-
-    @property
-    def bytes_consumed(self):
-        """Total number of bytes consumed from the response stream."""
-        return self._bytes_consumed
 
 
 # IOC type mappings for CSV column headers
@@ -477,282 +437,17 @@ def fetch_iocs_from_anomali(
             )
             raise
 
-def download_existing_lookup_files(
-        repository: str, ioc_type: Optional[str], temp_dir: str, logger: Logger
-) -> Dict[str, str]:
-    """Download existing lookup files to disk (returns filename -> file path mapping)
-
-    Memory-efficient disk-based streaming: files are downloaded directly to disk
-    instead of being held in memory. This enables processing files up to 200MB
-    with constant ~3-5MB memory overhead regardless of file size.
-    """
-    # Check if we're in test mode
-    test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
-
-    if test_mode:
-        return download_existing_lookup_files_locally(repository, ioc_type, temp_dir, logger)
-    return download_existing_lookup_files_from_ngsiem(repository, ioc_type, temp_dir, logger)
-
-def download_existing_lookup_files_locally(
-        repository: str, ioc_type: Optional[str], temp_dir: str, logger: Logger
-) -> Dict[str, str]:
-    """Copy existing lookup files from local test directory to temp_dir (returns filename -> path)"""
-    existing_files = {}
-
-    # Local test directory
-    test_dir = os.path.join(os.getcwd(), "test_output", repository)
-
-    try:
-        logger.info(f"TEST MODE: Checking for existing lookup files in: {test_dir}")
-        if ioc_type:
-            logger.info(f"TEST MODE: Filtering for IOC type: {ioc_type}")
-
-        # Known Anomali lookup file names
-        known_filenames = [
-            "anomali_threatstream_ip.csv",
-            "anomali_threatstream_domain.csv",
-            "anomali_threatstream_url.csv",
-            "anomali_threatstream_email.csv",
-            "anomali_threatstream_hash_md5.csv",
-            "anomali_threatstream_hash_sha1.csv",
-            "anomali_threatstream_hash_sha256.csv"
-        ]
-
-        # Filter by type if specified
-        if ioc_type:
-            type_filter = ioc_type
-            if ioc_type == "hash":
-                # If type is "hash", read all hash types (md5, sha1, sha256)
-                type_patterns = ["hash_md5", "hash_sha1", "hash_sha256"]
-                filenames_to_try = [f for f in known_filenames
-                                    if any(pattern in f for pattern in type_patterns)]
-            else:
-                # Map specific hash types
-                if ioc_type == "md5":
-                    type_filter = "hash_md5"
-                elif ioc_type == "sha1":
-                    type_filter = "hash_sha1"
-                elif ioc_type == "sha256":
-                    type_filter = "hash_sha256"
-
-                filenames_to_try = [f for f in known_filenames if type_filter in f]
-        else:
-            filenames_to_try = known_filenames
-
-        logger.info(f"TEST MODE: Attempting to read {len(filenames_to_try)} existing lookup files" +
-                    (f" for type '{ioc_type}'" if ioc_type else ""))
-
-        # Copy each existing file to temp_dir for streaming processing
-        for filename in filenames_to_try:
-            source_path = os.path.join(test_dir, filename)
-            try:
-                if os.path.exists(source_path):
-                    logger.info(f"TEST MODE: Copying existing lookup file: {filename}")
-                    dest_path = os.path.join(temp_dir, f"existing_{filename}")
-                    shutil.copy2(source_path, dest_path)
-                    file_size = os.path.getsize(dest_path)
-                    existing_files[filename] = dest_path  # Return file PATH, not content
-                    logger.info(f"TEST MODE: Copied {filename} ({file_size:,} bytes) to {dest_path}")
-                else:
-                    logger.info(f"TEST MODE: File {filename} not found (expected for new files)")
-
-            except Exception as e:
-                logger.info(f"TEST MODE: File {filename} not accessible: {str(e)}")
-                continue
-
-    except Exception as e:
-        logger.error(f"TEST MODE: Error checking for existing lookup files: {str(e)}")
-
-    return existing_files
-
-def download_existing_lookup_files_from_ngsiem(
-        repository: str, ioc_type: Optional[str], temp_dir: str, logger: Logger
-) -> Dict[str, str]:
-    """Download existing lookup files to disk using FalconPy streaming (returns filename -> path)
-
-    Uses NGSIEM.get_file(stream=True) to download files directly to disk.
-    This keeps memory usage constant (~3-5MB) regardless of file size,
-    enabling processing of files up to the 200MB NGSIEM limit.
-
-    Resilience features:
-    - Streaming download with Content-Length verification
-    - Retry with exponential backoff (5 attempts: 5s, 10s, 20s, 40s, 60s max)
-    - Size verification to detect incomplete downloads
-    - Aborts if any existing file fails to download (prevents data loss)
-    """
-    # pylint: disable=too-many-branches,too-many-statements,too-many-locals,too-many-nested-blocks
-    existing_files = {}
-    failed_downloads = []  # Track files that existed but failed to download
-    max_retries = 5
-
-    try:
-        logger.info(f"Checking for existing lookup files in repository: {repository}")
-        if ioc_type:
-            logger.info(f"Filtering for IOC type: {ioc_type}")
-
-        # Known Anomali lookup file names
-        known_filenames = [
-            "anomali_threatstream_ip.csv",
-            "anomali_threatstream_domain.csv",
-            "anomali_threatstream_url.csv",
-            "anomali_threatstream_email.csv",
-            "anomali_threatstream_hash_md5.csv",
-            "anomali_threatstream_hash_sha1.csv",
-            "anomali_threatstream_hash_sha256.csv"
-        ]
-
-        # Filter by type if specified
-        if ioc_type:
-            type_filter = ioc_type
-            if ioc_type == "hash":
-                # If type is "hash", download all hash types (md5, sha1, sha256)
-                type_patterns = ["hash_md5", "hash_sha1", "hash_sha256"]
-                filenames_to_try = [f for f in known_filenames
-                                    if any(pattern in f for pattern in type_patterns)]
-            else:
-                # Map specific hash types
-                if ioc_type == "md5":
-                    type_filter = "hash_md5"
-                elif ioc_type == "sha1":
-                    type_filter = "hash_sha1"
-                elif ioc_type == "sha256":
-                    type_filter = "hash_sha256"
-
-                filenames_to_try = [f for f in known_filenames if type_filter in f]
-        else:
-            filenames_to_try = known_filenames
-
-        logger.info(f"Attempting to download {len(filenames_to_try)} existing Anomali lookup files" +
-                    (f" for type '{ioc_type}'" if ioc_type else ""))
-
-        # Use FalconPy NGSIEM client with streaming support
-        # 10-minute timeout for large files (200MB at ~350KB/s = ~9.5 minutes)
-        ngsiem = NGSIEM(timeout=600)
-
-        for filename in filenames_to_try:
-            # Retry logic for download
-            last_error = None
-            downloaded = False
-            file_not_found = False
-
-            for attempt in range(1, max_retries + 1):
-                if attempt > 1:
-                    # Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped at 60s)
-                    backoff = min(5 * (2 ** (attempt - 2)), 60)
-                    logger.info(f"Retrying download of {filename} after {backoff}s "
-                                f"(attempt {attempt}/{max_retries})")
-                    time.sleep(backoff)
-
-                try:
-                    # Use FalconPy's streaming support
-                    resp = ngsiem.get_file(
-                        repository=repository,
-                        filename=filename,
-                        stream=True
-                    )
-
-                    # Extract status_code from response (handles both response object and dict)
-                    status_code = 0
-                    if hasattr(resp, 'status_code'):
-                        status_code = resp.status_code
-                    elif isinstance(resp, dict):
-                        status_code = resp.get("status_code", 0)
-
-                    # Handle 404 - file doesn't exist (not an error, just skip)
-                    if status_code == 404:
-                        logger.info(f"File {filename} not found (will be created)")
-                        file_not_found = True
-                        break  # Exit retry loop - no need to retry for non-existent files
-
-                    # Handle non-200 responses (retry)
-                    if status_code not in (0, 200):
-                        last_error = f"HTTP {status_code}"
-                        logger.warning(f"Download attempt {attempt} failed for {filename}: {last_error}")
-                        continue
-
-                    # Get expected size from Content-Length header for verification
-                    expected_size = 0
-                    if hasattr(resp, 'headers'):
-                        expected_size = int(resp.headers.get("Content-Length", 0))
-                        logger.info(f"File exists: {filename}, downloading {expected_size:,} bytes "
-                                    f"({expected_size / (1024*1024):.2f} MB)")
-
-                    dest_path = os.path.join(temp_dir, f"existing_{filename}")
-                    bytes_written = 0
-                    last_progress_log = 0  # Track when we last logged progress
-
-                    # Stream to disk with progress logging for large files
-                    with open(dest_path, 'wb') as f:
-                        if hasattr(resp, 'iter_content'):
-                            # Streaming response
-                            for chunk in resp.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
-                                    bytes_written += len(chunk)
-                                    # Log progress every 10MB for large files
-                                    if bytes_written - last_progress_log >= 10 * 1024 * 1024:
-                                        logger.info(f"Download progress: {filename} - "
-                                                    f"{bytes_written / (1024*1024):.1f}MB / "
-                                                    f"{expected_size / (1024*1024):.1f}MB")
-                                        last_progress_log = bytes_written
-                        elif isinstance(resp, bytes):
-                            # Non-streaming fallback (shouldn't happen with stream=True)
-                            f.write(resp)
-                            bytes_written = len(resp)
-
-                    # Verify downloaded size matches expected size (if known)
-                    if expected_size > 0 and bytes_written != expected_size:
-                        os.remove(dest_path)
-                        last_error = f"Size mismatch: got {bytes_written}, expected {expected_size}"
-                        logger.warning(f"Download attempt {attempt} for {filename}: {last_error}")
-                        continue
-
-                    # Success!
-                    existing_files[filename] = dest_path
-                    logger.info(f"Downloaded {filename} to disk ({bytes_written:,} bytes, "
-                                f"attempt {attempt})")
-                    downloaded = True
-                    break
-
-                except Exception as e:
-                    last_error = str(e)
-                    logger.warning(f"Error on download attempt {attempt} for {filename}: {last_error}")
-                    continue
-
-            # Skip files that don't exist - no data loss risk
-            if file_not_found:
-                continue
-
-            # File existed but all retries failed - data loss risk
-            if not downloaded:
-                logger.error(f"Failed to download existing file {filename} after {max_retries} retries: "
-                             f"{last_error}")
-                failed_downloads.append(filename)
-
-    except Exception as e:
-        logger.error(f"Error checking for existing lookup files: {str(e)}")
-        raise
-
-    # If any existing files failed to download, abort to prevent data loss
-    if failed_downloads:
-        raise AnomaliFunctionError(
-            f"Download failed for {len(failed_downloads)} existing file(s) after {max_retries} "
-            f"retries each: {failed_downloads} - aborting to prevent data loss"
-        )
-
-    return existing_files
-
 
 def check_existing_file_metadata(
         repository: str, ioc_type: Optional[str], logger: Logger
-) -> Dict[str, int]:
+) -> Set[str]:
     """Check which lookup files exist in NGSIEM without downloading.
 
-    Returns filename -> Content-Length mapping for existing files only.
-    Uses same retry logic as download function (5 attempts, exponential backoff).
+    Returns a set of filenames that exist in NGSIEM.
+    Uses retry logic with 5 attempts and exponential backoff.
     """
     # pylint: disable=too-many-branches,too-many-statements
-    existing_files = {}
+    existing_files: Set[str] = set()
     max_retries = 5
 
     # Known Anomali lookup file names
@@ -800,49 +495,25 @@ def check_existing_file_metadata(
                 time.sleep(backoff)
 
             try:
-                resp = ngsiem.get_file(
-                    repository=repository,
-                    filename=filename,
-                    stream=True
+                resp = ngsiem.list_lookup_files(
+                    filter=f"name:~'{filename}'",
+                    search_domain=repository
                 )
-
-                status_code = 0
-                if hasattr(resp, 'status_code'):
-                    status_code = resp.status_code
-                elif isinstance(resp, dict):
-                    status_code = resp.get("status_code", 0)
-
-                if status_code == 404:
-                    logger.info(f"File {filename} not found (will be created)")
-                    break  # Not an error, just doesn't exist
-
+                status_code = resp.get("status_code", 0) if isinstance(resp, dict) else 0
                 if status_code not in (0, 200):
                     last_error = f"HTTP {status_code}"
                     logger.warning(f"Metadata check attempt {attempt} failed for {filename}: {last_error}")
-                    # Close response if possible
-                    if hasattr(resp, 'close'):
-                        resp.close()
                     continue
 
-                # Extract Content-Length and close immediately
-                # Use -1 when header is missing (chunked transfer encoding)
-                # to distinguish "size unknown" from "truly empty"
-                content_length = -1
-                if hasattr(resp, 'headers'):
-                    cl_header = resp.headers.get("Content-Length")
-                    if cl_header is not None:
-                        content_length = int(cl_header)
+                # Extract file list from response (resources is a list of filename strings)
+                resources = resp.get("body", {}).get("resources", []) if isinstance(resp, dict) else []
 
-                # Close response without downloading body
-                if hasattr(resp, 'close'):
-                    resp.close()
+                if filename not in resources:
+                    logger.info(f"File {filename} not found (will be created)")
+                    break  # Not an error, just doesn't exist
 
-                existing_files[filename] = content_length
-                if content_length >= 0:
-                    logger.info(f"File exists: {filename} ({content_length:,} bytes, "
-                                f"{content_length / (1024*1024):.2f} MB)")
-                else:
-                    logger.info(f"File exists: {filename} (size unknown - no Content-Length header)")
+                existing_files.add(filename)
+                logger.info(f"File exists: {filename}")
                 break
 
             except Exception as e:
@@ -903,7 +574,7 @@ def clear_update_id_for_type(
         # This is expected if the update_id doesn't exist yet
 
 def process_iocs_to_csv(
-        iocs: List[Dict], temp_dir: str, existing_files: Dict[str, Union[str, int]],
+        iocs: List[Dict], temp_dir: str, existing_files: Set[str],
         logger: Logger, repository: str = ""
 ) -> tuple[List[str], Dict[str, int]]:
     """Process IOCs and create CSV files by type with intelligent threat intelligence deduplication
@@ -912,11 +583,10 @@ def process_iocs_to_csv(
     intelligence data for each IOC. This ensures security analysts receive current confidence
     scores, threat classifications, and APT attribution rather than outdated intelligence.
 
-    Memory-Efficient Disk Streaming:
-    - existing_files values can be file paths (str) for disk-based merge (test mode)
-      or Content-Length integers (int) for stream-merge from NGSIEM (production mode)
-    - Streams through existing files without loading into memory
-    - Enables processing 200MB files with ~3-5MB constant memory overhead
+    Server-Side Deduplication:
+    - When existing_files contains an entry for a filename, only new rows are written
+    - The NGSIEM update_lookup_file_entries() API handles deduplication server-side
+    - This avoids downloading the full existing file, preventing /tmp OOM
 
     Deduplication Logic:
     - Implements STIX 2.1 compliant temporal precedence
@@ -927,9 +597,9 @@ def process_iocs_to_csv(
     Args:
         iocs: List of IOC dictionaries from Anomali ThreatStream
         temp_dir: Temporary directory for file creation
-        existing_files: Dictionary of filename -> file PATH (str) or Content-Length (int)
+        existing_files: Set of filenames that exist in NGSIEM
         logger: Logger instance for tracking operations
-        repository: NGSIEM repository name (required for stream-merge mode)
+        repository: NGSIEM repository name (required for server-side update mode)
 
     Returns:
         tuple: (created_files, stats) where stats contains:
@@ -985,7 +655,6 @@ def process_iocs_to_csv(
         filename = f"anomali_threatstream_{ioc_type}.csv"
         filepath = os.path.join(temp_dir, filename)
         columns = mapping["columns"]
-        primary_col = columns[0]
 
         # Build new IOC rows and collect their primary keys
         # Memory: O(new_iocs) - typically small compared to existing file
@@ -1009,122 +678,40 @@ def process_iocs_to_csv(
                     str(ioc.get("expiration_ts", ''))
                 ]
 
-        new_keys = set(new_rows.keys())
         logger.info(f"Prepared {len(new_rows)} new IOCs for {ioc_type}")
 
-        # Check if we have existing data file to stream from
-        existing_file_info = existing_files.get(filename)
-        # Streaming CSV processing - memory efficient
-        original_count = 0
-        duplicates_updated = 0
+        # Check if file already exists in NGSIEM
+        file_exists = filename in existing_files
         rows_written = 0
 
-        if isinstance(existing_file_info, int) and existing_file_info != 0 and repository:
+        if file_exists and repository:
             # Server-side merge path: write only new rows to /tmp.
             # Deduplication will happen server-side via update_lookup_file_entries().
-            # This avoids downloading the full existing file, preventing /tmp OOM.
             logger.info(
                 f"Writing {len(new_rows)} new rows for {filename} "
-                f"(server-side dedup via update_lookup_file_entries, "
-                f"existing file: {existing_file_info:,} bytes)"
+                f"(server-side dedup via update_lookup_file_entries, existing file present)"
             )
-            with open(filepath, 'w', newline='', encoding='utf-8') as outfile:
-                writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
-                writer.writerow(columns)
-                writer.writerows(new_rows.values())
-                rows_written = len(new_rows)
         else:
-            # Disk-based merge path: existing_file_info is a file path (str) or None
-            existing_file_path = existing_file_info if isinstance(existing_file_info, str) else None
+            logger.info(f"Writing {len(new_rows)} new rows for new file {filename}")
 
-            # Use larger buffer (1MB) for better I/O performance
-            with open(filepath, 'w', newline='', encoding='utf-8', buffering=1024*1024) as outfile:
-                writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
-                writer.writerow(columns)  # Write header
-
-                # Stream existing data from disk file, filtering out rows that will be replaced
-                if existing_file_path and os.path.exists(existing_file_path):
-                    try:
-                        # Open file directly - no memory loading
-                        with open(existing_file_path, 'r', encoding='utf-8') as infile:
-                            reader = csv.reader(infile)
-                            header = next(reader)  # Skip header
-
-                            # Verify columns match
-                            if header[0] != primary_col:
-                                logger.warning(
-                                    f"Existing file {filename} has incompatible columns "
-                                    f"(expected {primary_col}, got {header[0]}), starting fresh"
-                                )
-                            else:
-                                # Batch writes for better performance
-                                batch = []
-                                batch_size = 10000
-
-                                for row in reader:
-                                    original_count += 1
-                                    if row and row[0] not in new_keys:
-                                        batch.append(row)
-                                        rows_written += 1
-                                        if len(batch) >= batch_size:
-                                            writer.writerows(batch)
-                                            batch = []
-                                    else:
-                                        duplicates_updated += 1
-
-                                # Write remaining batch
-                                if batch:
-                                    writer.writerows(batch)
-
-                                logger.info(f"Streamed {original_count} existing records from {filename}")
-                    except Exception as e:
-                        logger.warning(f"Error reading existing file {filename}: {e}, starting fresh")
-
-                # Write new rows in batch
-                writer.writerows(new_rows.values())
-                rows_written += len(new_rows)
+        with open(filepath, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.writer(outfile, quoting=csv.QUOTE_ALL)
+            writer.writerow(columns)
+            writer.writerows(new_rows.values())
+            rows_written = len(new_rows)
 
         # Calculate statistics
-        new_unique_added = len(new_rows) - duplicates_updated
-        stats["total_duplicates_removed"] += duplicates_updated
-
-        if new_unique_added > 0 or (not existing_file_info and new_rows):
+        if new_rows:
             stats["files_with_new_data"] += 1
 
         # Check file size
         file_size = os.path.getsize(filepath)
         file_size_mb = file_size / (1024 * 1024)
 
-        # SAFETY CHECK: If existing file was present, verify new file isn't dramatically smaller
-        # This prevents data loss if something went wrong during download or processing
-        # Skip this check for server-side update path (int) since we only write new rows
-        if existing_file_info and not isinstance(existing_file_info, int):
-            # Disk-based mode: compare against file on disk
-            existing_size = os.path.getsize(existing_file_info) if os.path.exists(existing_file_info) else 0
-
-            # If new file is less than 10% of existing file size, something is wrong
-            # (unless existing file was tiny, i.e., < 10KB)
-            if existing_size > 10 * 1024 and file_size < existing_size // 10:
-                error_msg = (
-                    f"SAFETY CHECK FAILED: new file {filename} ({file_size_mb:.2f} MB, "
-                    f"{rows_written:,} records) is dramatically smaller than existing file "
-                    f"({existing_size / (1024*1024):.2f} MB). This likely indicates data loss. "
-                    f"Aborting to protect existing data. Check download logs for errors."
-                )
-                logger.error(error_msg)
-                raise AnomaliFunctionError(error_msg)
-
-
-        if existing_file_info and isinstance(existing_file_info, int):
+        if file_exists:
             logger.info(
                 f"Prepared {len(new_rows)} new rows for server-side update of {filename} "
-                f"({file_size_mb:.2f} MB batch, existing file: {existing_file_info:,} bytes)"
-            )
-        elif existing_file_info:
-            logger.info(
-                f"Merged {original_count} existing + {len(new_rows)} new = "
-                f"{rows_written} total records for {filename} "
-                f"({new_unique_added} net new, {duplicates_updated} updated)"
+                f"({file_size_mb:.2f} MB batch)"
             )
         else:
             logger.info(f"Created new {filename} with {rows_written} records ({file_size_mb:.2f} MB)")
@@ -1134,8 +721,8 @@ def process_iocs_to_csv(
     return created_files, stats
 
 def upload_entries_to_ngsiem(
-        csv_files: List[str], repository: str,  # pylint: disable=unused-argument
-        existing_files: Dict[str, Union[str, int]], logger: Logger
+        csv_files: List[str], repository: str,
+        existing_files: Set[str], logger: Logger
 ) -> List[Dict]:
     """Upload new IOC rows using update_lookup_file_entries() for server-side deduplication.
 
@@ -1149,7 +736,7 @@ def upload_entries_to_ngsiem(
     Args:
         csv_files: List of CSV file paths containing only new rows (with header)
         repository: NGSIEM repository name
-        existing_files: Dict of filename -> Content-Length (int) or file path (str)
+        existing_files: Set of filenames that exist in NGSIEM
         logger: Logger instance
 
     Returns:
@@ -1186,10 +773,10 @@ def upload_entries_to_ngsiem(
             # Retry loop for 429/503 transient errors
             status_code = 0
             for attempt in range(1, max_retries + 1):
-                if isinstance(existing_files.get(filename), int):
+                if filename in existing_files:
                     # Existing file: use update mode (match on key, replace row)
                     response = ngsiem.update_lookup_file_entries(
-                        search_domain="all",
+                        search_domain=repository,
                         filename=filename,
                         file=file_data,
                         update_mode="update",
@@ -1199,7 +786,7 @@ def upload_entries_to_ngsiem(
                 else:
                     # New file: use append mode
                     response = ngsiem.update_lookup_file_entries(
-                        search_domain="all",
+                        search_domain=repository,
                         filename=filename,
                         file=file_data,
                         update_mode="append"
@@ -1255,13 +842,12 @@ def upload_entries_to_ngsiem(
 
 def upload_csv_files_to_ngsiem(
         csv_files: List[str], repository: str, logger: Logger,
-        existing_files: Optional[Dict[str, Union[str, int]]] = None
+        existing_files: Optional[Set[str]] = None
 ) -> List[Dict]:
     """Upload CSV files to Falcon Next-Gen SIEM as lookup files or write locally in test mode.
 
-    When existing_files is provided and contains int values (production mode),
-    uses update_lookup_file_entries() for server-side deduplication instead of
-    uploading full merged files.
+    When existing_files is provided, uses update_lookup_file_entries() for
+    server-side deduplication instead of uploading full merged files.
     """
     # Check if we're in test mode
     test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
@@ -1571,45 +1157,30 @@ def extract_next_token_from_meta(meta, iocs, logger):
 def check_and_recover_missing_files(  # pylint: disable=too-many-branches
         repository: str,
         type_filter: Optional[str],
-        temp_dir: str,
         custom_storage: CustomStorage,
         logger: Logger
-) -> tuple[bool, Dict[str, Union[str, int]]]:
+) -> tuple[bool, Set[str]]:
     """Check for existing lookup files and handle missing file recovery.
 
     Args:
         repository: NGSIEM repository name
         type_filter: Optional IOC type filter
-        temp_dir: Temporary directory for streaming file downloads
         custom_storage: CustomStorage client for collections access
         logger: Logger instance
 
     Returns:
         tuple: (should_start_fresh, existing_files) where should_start_fresh indicates
-               if all files are missing and existing_files is a dict of filename -> value.
-               In test mode, values are file paths (str).
-               In production mode, values are Content-Length (int) for stream-merge.
+               if all files are missing and existing_files is a set of filenames.
     """
-    test_mode = os.environ.get("TEST_MODE", "false").lower() in ["true", "1", "yes"]
     should_start_fresh = False
-    existing_files: Dict[str, Union[str, int]] = {}
+    existing_files: Set[str] = set()
 
-    if test_mode:
-        # Test mode: download to disk (original behavior)
-        if not type_filter:
-            logger.info("No type filter specified - checking for any existing Anomali lookup files")
-            existing_files = download_existing_lookup_files(repository, None, temp_dir, logger)
-        else:
-            logger.info(f"Checking for existing files for type: {type_filter}")
-            existing_files = download_existing_lookup_files(repository, type_filter, temp_dir, logger)
+    if not type_filter:
+        logger.info("No type filter specified - checking metadata for existing Anomali lookup files")
+        existing_files = check_existing_file_metadata(repository, None, logger)
     else:
-        # Production mode: metadata-only check (no download to disk)
-        if not type_filter:
-            logger.info("No type filter specified - checking metadata for existing Anomali lookup files")
-            existing_files = check_existing_file_metadata(repository, None, logger)
-        else:
-            logger.info(f"Checking metadata for existing files for type: {type_filter}")
-            existing_files = check_existing_file_metadata(repository, type_filter, logger)
+        logger.info(f"Checking metadata for existing files for type: {type_filter}")
+        existing_files = check_existing_file_metadata(repository, type_filter, logger)
 
     if not existing_files:
         if not type_filter:
@@ -1669,11 +1240,6 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
     Processes a single page of IOCs for workflow-level pagination. The workflow
     handles looping based on the "next" token returned when more data is available.
-
-    Memory-Efficient Disk Streaming:
-    - Files are downloaded directly to disk (not memory) for O(1) memory usage
-    - Enables processing 200MB files with ~3-5MB constant memory overhead
-    - temp_dir is created early for streaming downloads and processing
 
     Args:
         request: The incoming request object containing the request body.
@@ -1746,22 +1312,20 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             headers = {"X-CS-APP-ID": os.environ.get("APP_ID")}
         custom_storage = CustomStorage(ext_headers=headers)
 
-        # Create temp_dir early for disk-based streaming (O(1) memory)
-        # This is used for downloading existing files and creating new CSV files
+        # Create temp_dir for CSV file creation during processing
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Phase 1: Download existing lookup files
+            # Phase 1: Check existing lookup files
             phase1_start = time.time()
-            logger.info("Phase 1: Downloading existing lookup files...")
+            logger.info("Phase 1: Checking existing lookup files...")
 
             # Check for existing files and handle missing file recovery
-            # Files are streamed directly to temp_dir (not held in memory)
             should_start_fresh, existing_files = check_and_recover_missing_files(
-                repository, type_filter, temp_dir, custom_storage, logger
+                repository, type_filter, custom_storage, logger
             )
 
             phase1_elapsed = time.time() - phase1_start
             logger.info(
-                f"Phase 1 complete: Downloaded {len(existing_files)} existing files "
+                f"Phase 1 complete: Found {len(existing_files)} existing files "
                 f"in {format_elapsed_time(phase1_elapsed)}"
             )
 
