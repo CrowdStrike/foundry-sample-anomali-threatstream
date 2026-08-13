@@ -13,7 +13,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -43,8 +42,6 @@ import (
 
 // Constants
 const (
-	MaxUploadSizeBytes      = 200 * 1024 * 1024 // 200 MB
-	WarningThresholdBytes   = 180 * 1024 * 1024 // 180 MB
 	CollectionUpdateTracker = "update_id_tracker"
 	CollectionIngestJobs    = "ingest_jobs"
 	KeyLastUpdate           = "last_update"
@@ -115,7 +112,6 @@ type IngestRequest struct {
 	Severity        string `json:"severity"`
 	Limit           int    `json:"limit"`
 	Next            string `json:"next"`
-	FailFastEnabled bool   `json:"fail_fast_enabled"`
 }
 
 // IngestResponse represents the response payload
@@ -151,17 +147,11 @@ type IOC struct {
 
 // ProcessStats tracks statistics during CSV processing
 type ProcessStats struct {
-	TotalNewIOCs           int `json:"total_new_iocs"`
-	TotalDuplicatesRemoved int `json:"total_duplicates_removed"`
-	FilesWithNewData       int `json:"files_with_new_data"`
+	TotalNewIOCs     int `json:"total_new_iocs"`
+	FilesWithNewData int `json:"files_with_new_data"`
 }
 
-// ExistingFileInfo holds metadata about an existing lookup file.
-// In test mode, TempPath is set (file on disk). In production mode, ContentLen is set (from HTTP header).
-type ExistingFileInfo struct {
-	TempPath   string // Non-empty in test mode (file on disk)
-	ContentLen int64  // Set in production mode (from HTTP Content-Length header; -1 if chunked/unknown)
-}
+// ProcessStats tracks statistics during CSV processing
 
 // LastUpdateTracker tracks the last update_id from Anomali API for incremental sync
 type LastUpdateTracker struct {
@@ -179,6 +169,62 @@ type IngestJob struct {
 	State            string                 `json:"state"`
 	IOCType          string                 `json:"ioc_type"`
 	Parameters       map[string]interface{} `json:"parameters"`
+}
+
+// isRetryableError checks if an API error is transient and should be retried.
+// Retryable: 429 (rate limited), 500 (internal/proxy error), 503 (service unavailable).
+func isRetryableError(err error) bool {
+	if apiErr, ok := err.(*runtime.APIError); ok {
+		switch apiErr.Code {
+		case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+			return true
+		}
+	}
+	return false
+}
+
+// callWithRetry executes an API call with retry logic for transient errors.
+// It retries on 429, 500, and 503 errors with exponential backoff.
+func callWithRetry[T any](ctx context.Context, logger *slog.Logger, description string, maxRetries int, fn func() (T, error)) (T, error) {
+	var zero T
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			backoffSeconds := 5 * (1 << uint(attempt-2))
+			if backoffSeconds > 60 {
+				backoffSeconds = 60
+			}
+			backoff := time.Duration(backoffSeconds) * time.Second
+			logger.Warn("Retrying after transient error",
+				"description", description,
+				"attempt", attempt,
+				"backoff_seconds", backoffSeconds)
+			select {
+			case <-ctx.Done():
+				return zero, fmt.Errorf("context cancelled during retry for %s: %w", description, ctx.Err())
+			case <-time.After(backoff):
+			}
+		}
+
+		result, err := fn()
+		if err == nil {
+			return result, nil
+		}
+
+		if !isRetryableError(err) {
+			return zero, err
+		}
+
+		logger.Warn("Retryable error",
+			"description", description,
+			"attempt", attempt,
+			"max_retries", maxRetries,
+			"error", err)
+
+		if attempt == maxRetries {
+			return zero, fmt.Errorf("%s failed after %d retries: %w", description, maxRetries, err)
+		}
+	}
+	return zero, fmt.Errorf("%s failed after %d retries", description, maxRetries)
 }
 
 func main() {
@@ -201,102 +247,6 @@ func isTestMode() bool {
 	return testMode == "true" || testMode == "1" || testMode == "yes"
 }
 
-// estimateFinalFileSizes checks if any file will exceed the 200 MB limit based on first batch.
-// This fail-fast check prevents wasting hours on pagination only to fail at the end.
-// Only runs on first execution (no existing files).
-func estimateFinalFileSizes(csvFiles []string, iocsInBatch int, totalCount int64, existingFiles map[string]ExistingFileInfo, logger *slog.Logger) error {
-	// Only run this check on first execution (no existing files)
-	if len(existingFiles) > 0 {
-		return nil
-	}
-
-	// Need at least some IOCs to estimate
-	if iocsInBatch == 0 || totalCount == 0 {
-		return nil
-	}
-
-	type projection struct {
-		filename         string
-		projectedRecords int
-		projectedSizeMB  float64
-	}
-	var projections []projection
-
-	for _, fp := range csvFiles {
-		filename := filepath.Base(fp)
-
-		fileInfo, err := os.Stat(fp)
-		if err != nil {
-			continue
-		}
-		fileSize := fileInfo.Size()
-		fileSizeMB := float64(fileSize) / (1024 * 1024)
-
-		// Count records in this file (subtract 1 for header)
-		file, err := os.Open(fp)
-		if err != nil {
-			continue
-		}
-		recordCount := 0
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			recordCount++
-		}
-		file.Close()
-		recordCount-- // Subtract header
-
-		if recordCount <= 0 {
-			continue
-		}
-
-		// Calculate bytes per record for this file type
-		bytesPerRecord := float64(fileSize) / float64(recordCount)
-
-		// Calculate what percentage of the batch went to this file
-		distributionPct := float64(recordCount) / float64(iocsInBatch)
-
-		// Project total records for this file type
-		projectedRecords := int(float64(totalCount) * distributionPct)
-
-		// Project final file size
-		projectedSize := float64(projectedRecords) * bytesPerRecord
-		projectedSizeMB := projectedSize / (1024 * 1024)
-
-		logger.Info("File size projection",
-			"filename", filename,
-			"current_records", recordCount,
-			"current_size_mb", fileSizeMB,
-			"distribution_pct", distributionPct,
-			"projected_records", projectedRecords,
-			"projected_size_mb", projectedSizeMB)
-
-		if projectedSize > float64(MaxUploadSizeBytes) {
-			projections = append(projections, projection{
-				filename:         filename,
-				projectedRecords: projectedRecords,
-				projectedSizeMB:  projectedSizeMB,
-			})
-		}
-	}
-
-	if len(projections) > 0 {
-		// Build error message for files that will exceed limit
-		var fileDetails []string
-		for _, p := range projections {
-			fileDetails = append(fileDetails, fmt.Sprintf("%s (~%.0f MB with %d records)", p.filename, p.projectedSizeMB, p.projectedRecords))
-		}
-		return fmt.Errorf(
-			"The estimated file size will exceed the 200 MB NGSIEM API upload limit. "+
-				"Based on first batch distribution: %s. "+
-				"Total IOCs matching query: %d. "+
-				"To reduce dataset size, use filters: "+
-				"1) Use 'feed_id' to limit ingestion to specific threat feeds, "+
-				"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70).",
-			strings.Join(fileDetails, ", "), totalCount)
-	}
-
-	return nil
-}
 
 func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *slog.Logger) fdk.Response {
 	req := r.Body
@@ -335,7 +285,6 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"confidence_gt", req.ConfidenceGt,
 		"severity", req.Severity,
 		"update_id_gt", req.UpdateIDGt,
-		"fail_fast_enabled", req.FailFastEnabled,
 	)
 
 	// Create temp directory early for file downloads and processing
@@ -360,23 +309,20 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 
 	// Check for existing files and handle missing file recovery
 	downloadStartTime := time.Now()
-	logger.Info("Phase 1: Checking for existing lookup files")
-	shouldStartFresh, existingFilePaths, err := checkAndRecoverMissingFiles(ctx, falconClient, r.AccessToken, repository, req.Type, tempDir, logger)
+	logger.Info("Phase 1: Checking existing lookup files...")
+	shouldStartFresh, existingFiles, err := checkAndRecoverMissingFiles(ctx, falconClient, repository, req.Type, logger)
 	downloadDuration := time.Since(downloadStartTime)
 	if err != nil {
-		// CRITICAL: Do NOT swallow this error! If downloads failed, we must abort
-		// to prevent data loss. The error message already says "aborting to prevent data loss"
-		// so we must actually abort, not just log and continue.
-		logger.Error("Failed to download existing files - aborting to prevent data loss",
+		logger.Error("Failed to check existing files - aborting",
 			"error", err,
 			"duration_seconds", downloadDuration.Seconds())
 		return fdk.ErrResp(fdk.APIError{
 			Code:    500,
-			Message: fmt.Sprintf("Download failed: %v. Please retry later.", err),
+			Message: fmt.Sprintf("Metadata check failed: %v. Please retry later.", err),
 		})
 	}
 	logger.Info("Phase 1 complete: Existing files checked",
-		"files_found", len(existingFilePaths),
+		"files_found", len(existingFiles),
 		"should_start_fresh", shouldStartFresh,
 		"duration_seconds", downloadDuration.Seconds())
 
@@ -402,7 +348,7 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		// Safety check: if we have saved progress but couldn't download existing files,
 		// we should not proceed as we would lose accumulated data by uploading a partial file.
 		// This can happen if the file download times out or fails temporarily.
-		if lastUpdate != nil && req.Type != "" && len(existingFilePaths) == 0 && !shouldStartFresh {
+		if lastUpdate != nil && req.Type != "" && len(existingFiles) == 0 && !shouldStartFresh {
 			logger.Error("Data integrity protection: have saved progress but cannot download existing files",
 				"type", req.Type,
 				"last_update_id", lastUpdate.UpdateID,
@@ -472,7 +418,7 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	// Process IOCs into CSV files (tempDir already created earlier)
 	processStartTime := time.Now()
 	logger.Info("Phase 3: Processing IOCs into CSV files")
-	csvFiles, stats, err := processIOCsToCSV(ctx, r.AccessToken, repository, iocs, tempDir, existingFilePaths, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	processDuration := time.Since(processStartTime)
 	if err != nil {
 		logger.Error("Failed to process IOCs into CSV",
@@ -491,31 +437,12 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	logger.Info("Phase 3 complete: CSV files created",
 		"files_created", len(csvFiles),
 		"new_iocs", stats.TotalNewIOCs,
-		"duplicates_updated", stats.TotalDuplicatesRemoved,
 		"duration_seconds", processDuration.Seconds())
-
-	// Fail-fast check: estimate final file sizes on first execution
-	// This prevents wasting hours on pagination only to fail at the end
-	if req.FailFastEnabled {
-		totalCount := getMetaTotalCount(meta)
-		if err := estimateFinalFileSizes(csvFiles, len(iocs), totalCount, existingFilePaths, logger); err != nil {
-			logger.Error("File size projection exceeds limit", "error", err)
-			if job != nil {
-				job.State = JobFailed
-				job.Error = err.Error()
-				_ = updateJob(ctx, falconClient, job, logger)
-			}
-			return fdk.ErrResp(fdk.APIError{
-				Code:    500,
-				Message: err.Error(),
-			})
-		}
-	}
 
 	// Upload CSV files to NGSIEM
 	uploadStartTime := time.Now()
 	logger.Info("Phase 4: Uploading CSV files to NGSIEM")
-	uploadResults, err := uploadCSVFilesToNGSIEM(ctx, falconClient, csvFiles, repository, logger)
+	uploadResults, err := uploadCSVFilesToNGSIEM(ctx, falconClient, csvFiles, repository, existingFiles, logger)
 	uploadDuration := time.Since(uploadStartTime)
 	if err != nil {
 		logger.Error("Failed to upload files",
@@ -557,7 +484,6 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"total_iocs_processed", len(iocs),
 		"files_created", len(csvFiles),
 		"new_iocs", stats.TotalNewIOCs,
-		"duplicates_updated", stats.TotalDuplicatesRemoved,
 		"total_duration_seconds", totalDuration.Seconds(),
 		"download_duration_seconds", downloadDuration.Seconds(),
 		"fetch_duration_seconds", fetchDuration.Seconds(),
@@ -573,9 +499,8 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		JobID:         getJobID(job),
 		Meta:          meta,
 		ProcessStats: map[string]interface{}{
-			"total_new_iocs":           stats.TotalNewIOCs,
-			"total_duplicates_removed": stats.TotalDuplicatesRemoved,
-			"files_with_new_data":      stats.FilesWithNewData,
+			"total_new_iocs":      stats.TotalNewIOCs,
+			"files_with_new_data": stats.FilesWithNewData,
 		},
 	}
 
@@ -735,19 +660,16 @@ func saveUpdateID(ctx context.Context, falconClient *client.CrowdStrikeAPISpecif
 		return err
 	}
 
-	reader := io.NopCloser(bytes.NewReader(data))
-	params := custom_storage.NewPutObjectParamsWithContext(ctx)
-	params.Body = reader
-	params.CollectionName = CollectionUpdateTracker
-	params.ObjectKey = objectKey
-
-	resp, err := falconClient.CustomStorage.PutObject(params)
+	_, err = callWithRetry(ctx, logger, fmt.Sprintf("saving update_id for %s", iocType), 5, func() (*custom_storage.PutObjectOK, error) {
+		reader := io.NopCloser(bytes.NewReader(data))
+		params := custom_storage.NewPutObjectParamsWithContext(ctx)
+		params.Body = reader
+		params.CollectionName = CollectionUpdateTracker
+		params.ObjectKey = objectKey
+		return falconClient.CustomStorage.PutObject(params)
+	})
 	if err != nil {
 		return err
-	}
-
-	if resp == nil {
-		return fmt.Errorf("failed to save update_id: nil response")
 	}
 
 	logger.Info("Successfully saved update_id", "type", iocType)
@@ -913,80 +835,36 @@ func clearCollectionData(ctx context.Context, falconClient *client.CrowdStrikeAP
 }
 
 // checkAndRecoverMissingFiles checks for existing lookup files and handles missing file recovery.
-// In test mode, downloads files to disk (TempPath). In production mode, only checks metadata (ContentLen).
-func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, accessToken, repository, iocType, tempDir string, logger *slog.Logger) (bool, map[string]ExistingFileInfo, error) {
+// Returns a set of filenames that exist in NGSIEM.
+func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, repository, iocType string, logger *slog.Logger) (bool, map[string]bool, error) {
 	shouldStartFresh := false
-	existingFiles := make(map[string]ExistingFileInfo)
+	var existingFiles map[string]bool
+	var err error
 
-	if isTestMode() {
-		// Test mode: download files to disk (existing behavior)
-		var filePaths map[string]string
-		var err error
+	if iocType == "" {
+		logger.Info("No type filter specified - checking metadata for existing Anomali lookup files")
+		existingFiles, err = checkExistingFileMetadata(ctx, falconClient, repository, "", logger)
+	} else {
+		logger.Info("Checking metadata for existing files for type", "type", iocType)
+		existingFiles, err = checkExistingFileMetadata(ctx, falconClient, repository, iocType, logger)
+	}
+	if err != nil {
+		return false, nil, err
+	}
 
-		if iocType == "" {
-			logger.Info("No type filter specified - checking for any existing Anomali lookup files")
-			filePaths, err = downloadExistingLookupFiles(ctx, accessToken, repository, "", tempDir, logger)
+	if iocType == "" {
+		if len(existingFiles) == 0 {
+			logger.Info("No existing Anomali lookup files found - starting completely fresh")
+			shouldStartFresh = true
 		} else {
-			logger.Info("Checking for existing files for type", "type", iocType)
-			filePaths, err = downloadExistingLookupFiles(ctx, accessToken, repository, iocType, tempDir, logger)
-		}
-		if err != nil {
-			return false, nil, err
-		}
-
-		for filename, path := range filePaths {
-			existingFiles[filename] = ExistingFileInfo{TempPath: path}
-		}
-
-		if iocType == "" {
-			if len(existingFiles) == 0 {
-				logger.Info("No existing Anomali lookup files found - starting completely fresh")
-				shouldStartFresh = true
-			} else {
-				logger.Info("Found existing Anomali lookup files", "count", len(existingFiles))
-				shouldStartFresh = checkAndClearMissingTypes(ctx, falconClient, existingFiles, logger)
-			}
-		} else {
-			if len(existingFiles) == 0 {
-				logger.Info("No existing files found for type - will create new file", "type", iocType)
-			} else {
-				logger.Info("Found existing files for type - will merge with existing data", "type", iocType)
-			}
+			logger.Info("Found existing Anomali lookup files", "count", len(existingFiles))
+			shouldStartFresh = checkAndClearMissingTypes(ctx, falconClient, existingFiles, logger)
 		}
 	} else {
-		// Production mode: only check metadata (Content-Length), no download
-		var fileSizes map[string]int64
-		var err error
-
-		if iocType == "" {
-			logger.Info("No type filter specified - checking metadata for existing Anomali lookup files")
-			fileSizes, err = checkExistingFileMetadata(ctx, accessToken, repository, "", logger)
+		if len(existingFiles) == 0 {
+			logger.Info("No existing files found for type - will create new file", "type", iocType)
 		} else {
-			logger.Info("Checking metadata for existing files for type", "type", iocType)
-			fileSizes, err = checkExistingFileMetadata(ctx, accessToken, repository, iocType, logger)
-		}
-		if err != nil {
-			return false, nil, err
-		}
-
-		for filename, size := range fileSizes {
-			existingFiles[filename] = ExistingFileInfo{ContentLen: size}
-		}
-
-		if iocType == "" {
-			if len(existingFiles) == 0 {
-				logger.Info("No existing Anomali lookup files found - starting completely fresh")
-				shouldStartFresh = true
-			} else {
-				logger.Info("Found existing Anomali lookup files", "count", len(existingFiles))
-				shouldStartFresh = checkAndClearMissingTypes(ctx, falconClient, existingFiles, logger)
-			}
-		} else {
-			if len(existingFiles) == 0 {
-				logger.Info("No existing files found for type - will create new file", "type", iocType)
-			} else {
-				logger.Info("Found existing files for type - will merge with existing data", "type", iocType)
-			}
+			logger.Info("Found existing files for type", "type", iocType)
 		}
 	}
 
@@ -995,7 +873,7 @@ func checkAndRecoverMissingFiles(ctx context.Context, falconClient *client.Crowd
 
 // checkAndClearMissingTypes checks for missing IOC type files and clears their update_ids.
 // Returns true if shouldStartFresh (currently always false from this helper).
-func checkAndClearMissingTypes(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, existingFiles map[string]ExistingFileInfo, logger *slog.Logger) bool {
+func checkAndClearMissingTypes(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, existingFiles map[string]bool, logger *slog.Logger) bool {
 	expectedFiles := make([]string, 0)
 	for iocTypeKey := range iocTypeMappings {
 		expectedFiles = append(expectedFiles, fmt.Sprintf("anomali_threatstream_%s.csv", iocTypeKey))
@@ -1033,312 +911,10 @@ func checkAndClearMissingTypes(ctx context.Context, falconClient *client.CrowdSt
 	return false
 }
 
-// downloadExistingLookupFiles downloads existing lookup files from NGSIEM to temp files
-// Returns a map of filename -> temp file path (to avoid loading large files into memory)
-func downloadExistingLookupFiles(ctx context.Context, accessToken, repository, iocType string, tempDir string, logger *slog.Logger) (map[string]string, error) {
-	if isTestMode() {
-		return downloadExistingLookupFilesLocally(repository, iocType, logger)
-	}
-
-	existingFilePaths := make(map[string]string)
-
-	knownFilenames := []string{
-		"anomali_threatstream_ip.csv",
-		"anomali_threatstream_domain.csv",
-		"anomali_threatstream_url.csv",
-		"anomali_threatstream_email.csv",
-		"anomali_threatstream_hash_md5.csv",
-		"anomali_threatstream_hash_sha1.csv",
-		"anomali_threatstream_hash_sha256.csv",
-	}
-
-	// Filter by type if specified
-	if iocType != "" {
-		typeFilter := iocType
-		switch iocType {
-		case "md5":
-			typeFilter = "hash_md5"
-		case "sha1":
-			typeFilter = "hash_sha1"
-		case "sha256":
-			typeFilter = "hash_sha256"
-		case "hash":
-			// Download all hash types
-			filtered := []string{}
-			for _, f := range knownFilenames {
-				if strings.Contains(f, "hash_") {
-					filtered = append(filtered, f)
-				}
-			}
-			knownFilenames = filtered
-			typeFilter = ""
-		}
-		if typeFilter != "" {
-			filtered := []string{}
-			for _, f := range knownFilenames {
-				if strings.Contains(f, typeFilter) {
-					filtered = append(filtered, f)
-				}
-			}
-			knownFilenames = filtered
-		}
-	}
-
-	logger.Info("Attempting to download existing lookup files", "count", len(knownFilenames))
-
-	// Get the API host from cloud configuration
-	opts := fdk.FalconClientOpts()
-	apiHost := falcon.Cloud(opts.Cloud).Host()
-
-	// Create HTTP client for direct API calls
-	// Use 10-minute timeout: 200MB at 350KB/s = 9.5 minutes (worst case)
-	httpClient := &http.Client{
-		Timeout: 10 * time.Minute,
-	}
-
-	// Track files that existed but failed to download (to prevent data loss)
-	failedDownloads := []string{}
-	// Increase retries to 5 for large files that may fail with network issues
-	// Backoff: 5s, 10s, 20s, 40s, 60s (capped) - total wait up to 135s between attempts
-	const maxRetries = 5
-
-	for _, filename := range knownFilenames {
-		// Build the URL for the lookup file endpoint
-		fileURL := fmt.Sprintf("https://%s/humio/api/v1/repositories/%s/files/%s",
-			apiHost,
-			url.PathEscape(repository),
-			url.PathEscape(filename))
-
-		logger.Debug("Downloading lookup file", "filename", filename, "url", fileURL)
-
-		// Retry logic: try up to 5 times for transient network errors
-		// Note: We use GET directly instead of HEAD because NGSIEM returns 405 for HEAD requests
-		var lastErr error
-		var downloaded bool
-		var fileNotFound bool
-
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			if attempt > 1 {
-				// Wait before retry with exponential backoff (5s, 10s, 20s, 40s, 60s cap)
-				// Longer backoffs give network infrastructure time to recover
-				backoffSeconds := 5 * (1 << uint(attempt-2)) // 5, 10, 20, 40...
-				if backoffSeconds > 60 {
-					backoffSeconds = 60 // Cap at 60 seconds
-				}
-				backoff := time.Duration(backoffSeconds) * time.Second
-				logger.Info("Retrying download after backoff",
-					"filename", filename,
-					"attempt", attempt,
-					"max_attempts", maxRetries,
-					"backoff_seconds", backoffSeconds)
-				time.Sleep(backoff)
-			}
-
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
-			if err != nil {
-				lastErr = fmt.Errorf("failed to create request: %w", err)
-				continue
-			}
-
-			req.Header.Set("Authorization", "Bearer "+accessToken)
-			req.Header.Set("Accept", "application/octet-stream")
-
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				lastErr = fmt.Errorf("HTTP request failed: %w", err)
-				logger.Warn("Download attempt failed",
-					"filename", filename,
-					"attempt", attempt,
-					"error", err)
-				continue
-			}
-
-			// Handle 404 - file doesn't exist (not an error, just means new file will be created)
-			if resp.StatusCode == http.StatusNotFound {
-				resp.Body.Close()
-				logger.Debug("Lookup file not found (will be created)", "filename", filename)
-				fileNotFound = true
-				break // Exit retry loop - no need to retry for non-existent files
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-				logger.Warn("Download attempt failed with HTTP error",
-					"filename", filename,
-					"attempt", attempt,
-					"status", resp.StatusCode)
-				continue
-			}
-
-			// Get expected size from Content-Length header for verification
-			expectedSize := resp.ContentLength
-			logger.Info("File exists, starting download",
-				"filename", filename,
-				"expected_size_bytes", expectedSize,
-				"expected_size_mb", float64(expectedSize)/(1024*1024),
-				"attempt", attempt,
-				"max_attempts", maxRetries)
-
-			// Stream file content directly to disk
-			tempFilePath := filepath.Join(tempDir, "existing_"+filename)
-			tempFile, err := os.Create(tempFilePath)
-			if err != nil {
-				resp.Body.Close()
-				lastErr = fmt.Errorf("failed to create temp file: %w", err)
-				continue
-			}
-
-			// Use progress reader for large files (>10MB) to track download progress
-			// This helps diagnose "unexpected EOF" issues by showing where downloads stall
-			var reader io.Reader = resp.Body
-			if expectedSize > 10*1024*1024 {
-				reader = newProgressReader(resp.Body, expectedSize, filename, logger)
-			}
-
-			// Use buffered copy to stream efficiently
-			bytesWritten, err := io.Copy(tempFile, reader)
-			resp.Body.Close()
-			tempFile.Close()
-
-			if err != nil {
-				os.Remove(tempFilePath)
-				percentComplete := float64(0)
-				if expectedSize > 0 {
-					percentComplete = float64(bytesWritten) / float64(expectedSize) * 100
-				}
-				lastErr = fmt.Errorf("stream failed after %d bytes (%.1f%%): %w", bytesWritten, percentComplete, err)
-				logger.Warn("Download stream failed",
-					"filename", filename,
-					"attempt", attempt,
-					"bytes_written", bytesWritten,
-					"expected_bytes", expectedSize,
-					"percent_complete", fmt.Sprintf("%.1f%%", percentComplete),
-					"error", err)
-				continue
-			}
-
-			// Verify downloaded size matches expected size (if known)
-			if expectedSize > 0 && bytesWritten != expectedSize {
-				os.Remove(tempFilePath)
-				lastErr = fmt.Errorf("size mismatch: got %d bytes, expected %d bytes", bytesWritten, expectedSize)
-				logger.Warn("Download size mismatch",
-					"filename", filename,
-					"attempt", attempt,
-					"bytes_written", bytesWritten,
-					"expected_bytes", expectedSize)
-				continue
-			}
-
-			// Success!
-			existingFilePaths[filename] = tempFilePath
-			logger.Info("Downloaded existing lookup file to disk",
-				"filename", filename,
-				"temp_path", tempFilePath,
-				"size_bytes", bytesWritten,
-				"size_mb", float64(bytesWritten)/(1024*1024),
-				"attempts", attempt)
-			downloaded = true
-			break
-		}
-
-		// Skip files that don't exist - no data loss risk
-		if fileNotFound {
-			continue
-		}
-
-		// File existed but all retries failed - this is a data loss risk
-		if !downloaded {
-			logger.Error("Failed to download existing lookup file after all retries",
-				"filename", filename,
-				"max_retries", maxRetries,
-				"error", lastErr)
-			failedDownloads = append(failedDownloads, filename)
-		}
-	}
-
-	// If any existing files failed to download, abort to prevent data loss
-	if len(failedDownloads) > 0 {
-		return nil, fmt.Errorf("download failed for %d existing file(s) after %d retries each: %v - aborting to prevent data loss",
-			len(failedDownloads), maxRetries, failedDownloads)
-	}
-
-	return existingFilePaths, nil
-}
-
-// downloadExistingLookupFilesLocally returns paths to existing lookup files from local test directory
-// Returns a map of filename -> file path (consistent with downloadExistingLookupFiles)
-func downloadExistingLookupFilesLocally(repository, iocType string, logger *slog.Logger) (map[string]string, error) {
-	existingFilePaths := make(map[string]string)
-
-	testDir := filepath.Join(".", "test_output", repository)
-	logger.Info("TEST MODE: Checking for existing lookup files", "dir", testDir)
-
-	knownFilenames := []string{
-		"anomali_threatstream_ip.csv",
-		"anomali_threatstream_domain.csv",
-		"anomali_threatstream_url.csv",
-		"anomali_threatstream_email.csv",
-		"anomali_threatstream_hash_md5.csv",
-		"anomali_threatstream_hash_sha1.csv",
-		"anomali_threatstream_hash_sha256.csv",
-	}
-
-	// Filter by type if specified
-	if iocType != "" {
-		typeFilter := iocType
-		switch iocType {
-		case "md5":
-			typeFilter = "hash_md5"
-		case "sha1":
-			typeFilter = "hash_sha1"
-		case "sha256":
-			typeFilter = "hash_sha256"
-		case "hash":
-			filtered := []string{}
-			for _, f := range knownFilenames {
-				if strings.Contains(f, "hash_") {
-					filtered = append(filtered, f)
-				}
-			}
-			knownFilenames = filtered
-			typeFilter = ""
-		}
-		if typeFilter != "" {
-			filtered := []string{}
-			for _, f := range knownFilenames {
-				if strings.Contains(f, typeFilter) {
-					filtered = append(filtered, f)
-				}
-			}
-			knownFilenames = filtered
-		}
-	}
-
-	for _, filename := range knownFilenames {
-		filePath := filepath.Join(testDir, filename)
-		fileInfo, err := os.Stat(filePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				logger.Info("TEST MODE: File not found (expected for new files)", "filename", filename)
-			} else {
-				logger.Warn("TEST MODE: Error checking file", "filename", filename, "error", err)
-			}
-			continue
-		}
-		existingFilePaths[filename] = filePath
-		logger.Info("TEST MODE: Found existing lookup file", "filename", filename, "size_bytes", fileInfo.Size())
-	}
-
-	return existingFilePaths, nil
-}
-
-// checkExistingFileMetadata checks NGSIEM for existing lookup files without downloading them.
-// Returns a map of filename -> Content-Length (-1 if chunked/unknown).
-// HTTP 404 means the file doesn't exist (skip, not error).
-func checkExistingFileMetadata(ctx context.Context, accessToken, repository, iocType string, logger *slog.Logger) (map[string]int64, error) {
-	existingFileSizes := make(map[string]int64)
+// checkExistingFileMetadata checks which lookup files exist in NGSIEM without downloading.
+// Returns a set of filenames that exist. Uses retry logic with 5 attempts and exponential backoff.
+func checkExistingFileMetadata(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, repository, iocType string, logger *slog.Logger) (map[string]bool, error) {
+	existingFiles := make(map[string]bool)
 
 	knownFilenames := []string{
 		"anomali_threatstream_ip.csv",
@@ -1383,341 +959,39 @@ func checkExistingFileMetadata(ctx context.Context, accessToken, repository, ioc
 
 	logger.Info("Checking existing lookup file metadata (no download)", "count", len(knownFilenames))
 
-	opts := fdk.FalconClientOpts()
-	apiHost := falcon.Cloud(opts.Cloud).Host()
-
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second, // Short timeout - only reading headers
-	}
-
-	const maxRetries = 5
-
 	for _, filename := range knownFilenames {
-		fileURL := fmt.Sprintf("https://%s/humio/api/v1/repositories/%s/files/%s",
-			apiHost,
-			url.PathEscape(repository),
-			url.PathEscape(filename))
-
-		var lastErr error
-		var checked bool
-		var fileNotFound bool
-
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			if attempt > 1 {
-				backoffSeconds := 5 * (1 << uint(attempt-2))
-				if backoffSeconds > 60 {
-					backoffSeconds = 60
-				}
-				backoff := time.Duration(backoffSeconds) * time.Second
-				logger.Info("Retrying metadata check after backoff",
-					"filename", filename,
-					"attempt", attempt,
-					"backoff_seconds", backoffSeconds)
-				time.Sleep(backoff)
-			}
-
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
-			if err != nil {
-				lastErr = fmt.Errorf("failed to create request: %w", err)
-				continue
-			}
-
-			req.Header.Set("Authorization", "Bearer "+accessToken)
-			req.Header.Set("Accept", "application/octet-stream")
-
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				lastErr = fmt.Errorf("HTTP request failed: %w", err)
-				logger.Warn("Metadata check attempt failed",
-					"filename", filename,
-					"attempt", attempt,
-					"error", err)
-				continue
-			}
-
-			// Close body immediately - we only need headers
-			resp.Body.Close()
-
-			if resp.StatusCode == http.StatusNotFound {
-				logger.Debug("Lookup file not found (will be created)", "filename", filename)
-				fileNotFound = true
-				break
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				lastErr = fmt.Errorf("HTTP %d checking metadata", resp.StatusCode)
-				logger.Warn("Metadata check failed with HTTP error",
-					"filename", filename,
-					"attempt", attempt,
-					"status", resp.StatusCode)
-				continue
-			}
-
-			// Success - record Content-Length
-			contentLen := resp.ContentLength // -1 if unknown/chunked
-			existingFileSizes[filename] = contentLen
-			logger.Info("Found existing lookup file",
-				"filename", filename,
-				"content_length", contentLen,
-				"size_mb", float64(contentLen)/(1024*1024))
-			checked = true
-			break
-		}
-
-		if fileNotFound {
-			continue
-		}
-
-		if !checked {
+		resp, err := callWithRetry(ctx, logger, fmt.Sprintf("metadata check for %s", filename), 5, func() (*ngsiem.ListLookupFilesOK, error) {
+			filter := fmt.Sprintf("name:~'%s'", filename)
+			params := ngsiem.NewListLookupFilesParamsWithContext(ctx)
+			params.Filter = &filter
+			params.SearchDomain = &repository
+			return falconClient.Ngsiem.ListLookupFiles(params)
+		})
+		if err != nil {
 			logger.Error("Failed to check file metadata after all retries",
 				"filename", filename,
-				"max_retries", maxRetries,
-				"error", lastErr)
-			return nil, fmt.Errorf("metadata check failed for %s after %d retries: %v", filename, maxRetries, lastErr)
-		}
-	}
-
-	return existingFileSizes, nil
-}
-
-// streamMergeFromNGSIEM streams an existing lookup file from NGSIEM over HTTP and merges it with new rows.
-// It reads existing rows one-by-one, filtering duplicates against newRows keys,
-// and writes surviving rows + new rows to outputPath.
-func streamMergeFromNGSIEM(ctx context.Context, accessToken, repository, filename, outputPath string, columns []string, newRows map[string][]string, expectedSize int64, logger *slog.Logger) (originalCount int, duplicatesUpdated int, rowsWritten int, err error) {
-	opts := fdk.FalconClientOpts()
-	apiHost := falcon.Cloud(opts.Cloud).Host()
-
-	fileURL := fmt.Sprintf("https://%s/humio/api/v1/repositories/%s/files/%s",
-		apiHost,
-		url.PathEscape(repository),
-		url.PathEscape(filename))
-
-	httpClient := &http.Client{
-		Timeout: 10 * time.Minute,
-	}
-
-	primaryCol := columns[0]
-
-	// Build lookup set of new row keys for duplicate detection
-	newKeys := make(map[string]bool, len(newRows))
-	for k := range newRows {
-		newKeys[k] = true
-	}
-
-	const maxRetries = 5
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt > 1 {
-			backoffSeconds := 5 * (1 << uint(attempt-2))
-			if backoffSeconds > 60 {
-				backoffSeconds = 60
-			}
-			backoff := time.Duration(backoffSeconds) * time.Second
-			logger.Info("Retrying stream-merge after backoff",
-				"filename", filename,
-				"attempt", attempt,
-				"backoff_seconds", backoffSeconds)
-			time.Sleep(backoff)
-			// Clean up partial output from previous attempt
-			os.Remove(outputPath)
+				"error", err)
+			return nil, fmt.Errorf("metadata check failed for %s: %v", filename, err)
 		}
 
-		// Reset counters for this attempt
-		originalCount = 0
-		duplicatesUpdated = 0
-		rowsWritten = 0
-
-		// Open streaming HTTP GET
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
-		if reqErr != nil {
-			err = fmt.Errorf("failed to create request: %w", reqErr)
-			continue
-		}
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("Accept", "application/octet-stream")
-
-		resp, httpErr := httpClient.Do(req)
-		if httpErr != nil {
-			err = fmt.Errorf("HTTP request failed: %w", httpErr)
-			logger.Warn("Stream-merge HTTP request failed",
-				"filename", filename, "attempt", attempt, "error", httpErr)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			err = fmt.Errorf("HTTP %d from NGSIEM", resp.StatusCode)
-			logger.Warn("Stream-merge got non-200 response",
-				"filename", filename, "attempt", attempt, "status", resp.StatusCode)
-			continue
-		}
-
-		// Create output file
-		outFile, createErr := os.Create(outputPath)
-		if createErr != nil {
-			resp.Body.Close()
-			err = fmt.Errorf("failed to create output file: %w", createErr)
-			continue
-		}
-
-		bufWriter := bufio.NewWriterSize(outFile, 1024*1024) // 1MB write buffer
-		writer := csv.NewWriter(bufWriter)
-
-		// Write header
-		if writeErr := writer.Write(columns); writeErr != nil {
-			resp.Body.Close()
-			outFile.Close()
-			os.Remove(outputPath)
-			err = fmt.Errorf("failed to write header: %w", writeErr)
-			continue
-		}
-
-		// Stream-read existing file from HTTP response body
-		var bodyReader io.Reader = resp.Body
-		if expectedSize > 10*1024*1024 {
-			bodyReader = newProgressReader(resp.Body, expectedSize, filename+" (stream-merge)", logger)
-		}
-		csvReader := csv.NewReader(bufio.NewReaderSize(bodyReader, 1024*1024)) // 1MB read buffer
-
-		// Read and verify header from stream
-		header, headerErr := csvReader.Read()
-		if headerErr != nil {
-			resp.Body.Close()
-			outFile.Close()
-			os.Remove(outputPath)
-			err = fmt.Errorf("failed to read header from stream: %w", headerErr)
-			logger.Warn("Stream-merge failed to read header",
-				"filename", filename, "attempt", attempt, "error", headerErr)
-			continue
-		}
-
-		if len(header) == 0 || header[0] != primaryCol {
-			resp.Body.Close()
-			outFile.Close()
-			os.Remove(outputPath)
-			err = fmt.Errorf("incompatible header: expected %q, got %q", primaryCol, header[0])
-			logger.Warn("Stream-merge found incompatible header",
-				"filename", filename, "expected", primaryCol, "got", header[0])
-			// Don't retry for schema mismatch - this is a logic error, not transient
-			break
-		}
-
-		// Stream rows: filter duplicates, write survivors in batches
-		batch := make([][]string, 0, 10000)
-		var streamErr error
-
-		for {
-			row, readErr := csvReader.Read()
-			if readErr == io.EOF {
+		// Check if filename is in the response resources
+		found := false
+		for _, resource := range resp.Payload.Resources {
+			if resource == filename {
+				found = true
 				break
 			}
-			if readErr != nil {
-				streamErr = readErr
-				break
-			}
-
-			originalCount++
-			if len(row) > 0 && !newKeys[row[0]] {
-				batch = append(batch, row)
-				rowsWritten++
-
-				if len(batch) >= 10000 {
-					if writeErr := writer.WriteAll(batch); writeErr != nil {
-						streamErr = fmt.Errorf("failed to write batch: %w", writeErr)
-						break
-					}
-					batch = batch[:0]
-				}
-			} else {
-				duplicatesUpdated++
-			}
 		}
 
-		resp.Body.Close()
-
-		if streamErr != nil {
-			outFile.Close()
-			os.Remove(outputPath)
-			err = fmt.Errorf("stream read error after %d rows: %w", originalCount, streamErr)
-			logger.Warn("Stream-merge read error",
-				"filename", filename, "attempt", attempt,
-				"rows_read", originalCount, "error", streamErr)
-			continue
+		if !found {
+			logger.Info("File not found (will be created)", "filename", filename)
+		} else {
+			existingFiles[filename] = true
+			logger.Info("File exists", "filename", filename)
 		}
-
-		// Write remaining batch of existing rows
-		if len(batch) > 0 {
-			if writeErr := writer.WriteAll(batch); writeErr != nil {
-				outFile.Close()
-				os.Remove(outputPath)
-				err = fmt.Errorf("failed to write final batch: %w", writeErr)
-				continue
-			}
-		}
-
-		// Write all new rows
-		newRowsList := make([][]string, 0, len(newRows))
-		for _, row := range newRows {
-			newRowsList = append(newRowsList, row)
-		}
-		if writeErr := writer.WriteAll(newRowsList); writeErr != nil {
-			outFile.Close()
-			os.Remove(outputPath)
-			err = fmt.Errorf("failed to write new rows: %w", writeErr)
-			continue
-		}
-		rowsWritten += len(newRows)
-
-		writer.Flush()
-		if flushErr := writer.Error(); flushErr != nil {
-			outFile.Close()
-			os.Remove(outputPath)
-			err = fmt.Errorf("csv writer flush error: %w", flushErr)
-			continue
-		}
-
-		if flushErr := bufWriter.Flush(); flushErr != nil {
-			outFile.Close()
-			os.Remove(outputPath)
-			err = fmt.Errorf("buffer flush error: %w", flushErr)
-			continue
-		}
-
-		outFile.Close()
-
-		// Verify output file size against expected (detect truncation)
-		if expectedSize > 0 {
-			outInfo, statErr := os.Stat(outputPath)
-			if statErr != nil {
-				os.Remove(outputPath)
-				err = fmt.Errorf("failed to stat output: %w", statErr)
-				continue
-			}
-			// The output should be at least as large as the original (we added rows)
-			// but the key check is that we read the full source stream.
-			// Content-Length check: we read all rows until EOF, which means the HTTP
-			// stream was fully consumed. If it was truncated, csv.Read would have
-			// returned an error before EOF.
-			_ = outInfo // Size verification is implicit via EOF-based reading
-		}
-
-		logger.Info("Stream-merge completed successfully",
-			"filename", filename,
-			"original_rows", originalCount,
-			"duplicates_updated", duplicatesUpdated,
-			"rows_written", rowsWritten,
-			"attempts", attempt)
-
-		// Success
-		err = nil
-		return
 	}
 
-	// All retries exhausted
-	if err == nil {
-		err = fmt.Errorf("stream-merge failed for %s after %d attempts", filename, maxRetries)
-	}
-	return
+	return existingFiles, nil
 }
 
 // fetchIOCsFromAnomali fetches IOCs from the Anomali ThreatStream API via API Integration
@@ -2058,7 +1332,7 @@ func mapToIOC(m map[string]interface{}) IOC {
 
 // processIOCsToCSV processes IOCs into CSV files with streaming for memory efficiency.
 // In test mode (TempPath set), merges from local disk. In production mode (ContentLen set), stream-merges from NGSIEM.
-func processIOCsToCSV(ctx context.Context, accessToken, repository string, iocs []IOC, tempDir string, existingFiles map[string]ExistingFileInfo, logger *slog.Logger) ([]string, ProcessStats, error) {
+func processIOCsToCSV(iocs []IOC, tempDir string, existingFiles map[string]bool, logger *slog.Logger) ([]string, ProcessStats, error) {
 	stats := ProcessStats{
 		TotalNewIOCs: len(iocs),
 	}
@@ -2086,7 +1360,6 @@ func processIOCsToCSV(ctx context.Context, accessToken, repository string, iocs 
 
 		filename := fmt.Sprintf("anomali_threatstream_%s.csv", iocType)
 		filePath := filepath.Join(tempDir, filename)
-		primaryCol := mapping.Columns[0]
 
 		// Build new IOC rows with deduplication (later entries win)
 		newRows := make(map[string][]string)
@@ -2111,157 +1384,47 @@ func processIOCsToCSV(ctx context.Context, accessToken, repository string, iocs 
 
 		logger.Info("Prepared new IOCs", "type", iocType, "count", len(newRows))
 
-		// Determine merge strategy based on ExistingFileInfo
-		info, hasExisting := existingFiles[filename]
+		// Check if file already exists in NGSIEM
+		fileExists := existingFiles[filename]
 
-		var originalCount, duplicatesUpdated, rowsWritten int
-
-		if hasExisting && info.TempPath != "" {
-			// TEST MODE: Disk-based merge from local temp file (existing behavior)
-			existingFilePath := info.TempPath
-
-			newKeys := make(map[string]bool)
-			for k := range newRows {
-				newKeys[k] = true
-			}
-
-			file, err := os.Create(filePath)
-			if err != nil {
-				return nil, stats, fmt.Errorf("failed to create file %s: %w", filename, err)
-			}
-
-			bufWriter := bufio.NewWriterSize(file, 1024*1024)
-			writer := csv.NewWriter(bufWriter)
-
-			if err := writer.Write(mapping.Columns); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("failed to write header: %w", err)
-			}
-
-			existingFile, err := os.Open(existingFilePath)
-			if err != nil {
-				logger.Warn("Error opening existing file, starting fresh", "filename", filename, "error", err)
-			} else {
-				reader := csv.NewReader(bufio.NewReaderSize(existingFile, 1024*1024))
-
-				header, err := reader.Read()
-				if err != nil {
-					logger.Warn("Error reading existing file header, starting fresh", "filename", filename, "error", err)
-				} else if len(header) > 0 && header[0] != primaryCol {
-					logger.Warn("Existing file has incompatible columns, starting fresh",
-						"filename", filename, "expected", primaryCol, "got", header[0])
-				} else {
-					batch := make([][]string, 0, 10000)
-
-					for {
-						row, err := reader.Read()
-						if err == io.EOF {
-							break
-						}
-						if err != nil {
-							logger.Warn("Error reading row, skipping", "error", err)
-							continue
-						}
-
-						originalCount++
-						if len(row) > 0 && !newKeys[row[0]] {
-							batch = append(batch, row)
-							rowsWritten++
-
-							if len(batch) >= 10000 {
-								if err := writer.WriteAll(batch); err != nil {
-									existingFile.Close()
-									file.Close()
-									return nil, stats, fmt.Errorf("failed to write batch: %w", err)
-								}
-								batch = batch[:0]
-							}
-						} else {
-							duplicatesUpdated++
-						}
-					}
-
-					if len(batch) > 0 {
-						if err := writer.WriteAll(batch); err != nil {
-							existingFile.Close()
-							file.Close()
-							return nil, stats, fmt.Errorf("failed to write final batch: %w", err)
-						}
-					}
-
-					logger.Info("Streamed existing records", "filename", filename, "count", originalCount)
-				}
-				existingFile.Close()
-			}
-
-			// Write new rows
-			newRowsList := make([][]string, 0, len(newRows))
-			for _, row := range newRows {
-				newRowsList = append(newRowsList, row)
-			}
-			if err := writer.WriteAll(newRowsList); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("failed to write new rows: %w", err)
-			}
-			rowsWritten += len(newRows)
-
-			writer.Flush()
-			if err := writer.Error(); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("csv writer error: %w", err)
-			}
-			if err := bufWriter.Flush(); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("buffer flush error: %w", err)
-			}
-			file.Close()
-
-		} else if hasExisting && info.ContentLen != 0 {
-			// PRODUCTION MODE: Stream-merge directly from NGSIEM HTTP response
-			var mergeErr error
-			originalCount, duplicatesUpdated, rowsWritten, mergeErr = streamMergeFromNGSIEM(
-				ctx, accessToken, repository, filename, filePath,
-				mapping.Columns, newRows, info.ContentLen, logger)
-			if mergeErr != nil {
-				return nil, stats, fmt.Errorf("stream-merge failed for %s: %w", filename, mergeErr)
-			}
-
+		if fileExists {
+			logger.Info("Writing new rows for server-side dedup",
+				"filename", filename,
+				"new_rows", len(newRows),
+				"existing_file_present", true)
 		} else {
-			// No existing file: write new rows only
-			file, err := os.Create(filePath)
-			if err != nil {
-				return nil, stats, fmt.Errorf("failed to create file %s: %w", filename, err)
-			}
-
-			bufWriter := bufio.NewWriterSize(file, 1024*1024)
-			writer := csv.NewWriter(bufWriter)
-
-			if err := writer.Write(mapping.Columns); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("failed to write header: %w", err)
-			}
-
-			newRowsList := make([][]string, 0, len(newRows))
-			for _, row := range newRows {
-				newRowsList = append(newRowsList, row)
-			}
-			if err := writer.WriteAll(newRowsList); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("failed to write new rows: %w", err)
-			}
-			rowsWritten = len(newRows)
-
-			writer.Flush()
-			if err := writer.Error(); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("csv writer error: %w", err)
-			}
-			if err := bufWriter.Flush(); err != nil {
-				file.Close()
-				return nil, stats, fmt.Errorf("buffer flush error: %w", err)
-			}
-			file.Close()
+			logger.Info("Writing new rows for new file", "filename", filename, "new_rows", len(newRows))
 		}
+
+		// Always write only new rows; server-side dedup handles merging for existing files
+		file, err := os.Create(filePath)
+		if err != nil {
+			return nil, stats, fmt.Errorf("failed to create file %s: %w", filename, err)
+		}
+
+		writer := csv.NewWriter(file)
+		if err := writer.Write(mapping.Columns); err != nil {
+			file.Close()
+			return nil, stats, fmt.Errorf("failed to write header: %w", err)
+		}
+
+		newRowsList := make([][]string, 0, len(newRows))
+		for _, row := range newRows {
+			newRowsList = append(newRowsList, row)
+		}
+		if err := writer.WriteAll(newRowsList); err != nil {
+			file.Close()
+			return nil, stats, fmt.Errorf("failed to write new rows: %w", err)
+		}
+
+		writer.Flush()
+		if err := writer.Error(); err != nil {
+			file.Close()
+			return nil, stats, fmt.Errorf("csv writer error: %w", err)
+		}
+		file.Close()
+
+		rowsWritten := len(newRows)
 
 		// Check file size
 		fileInfo, err := os.Stat(filePath)
@@ -2272,62 +1435,16 @@ func processIOCsToCSV(ctx context.Context, accessToken, repository string, iocs 
 		fileSize := fileInfo.Size()
 		fileSizeMB := float64(fileSize) / (1024 * 1024)
 
-		// SAFETY CHECK: If existing file was present, verify new file isn't dramatically smaller
-		if hasExisting {
-			var existingSize int64
-			if info.TempPath != "" {
-				existingFileInfo, statErr := os.Stat(info.TempPath)
-				if statErr == nil {
-					existingSize = existingFileInfo.Size()
-				}
-			} else if info.ContentLen > 0 {
-				existingSize = info.ContentLen
-			}
-			// If new file is less than 10% of existing file size, something is wrong
-			// (unless existing file was tiny, i.e., < 10KB)
-			if existingSize > 10*1024 && fileSize < existingSize/10 {
-				return nil, stats, fmt.Errorf(
-					"SAFETY CHECK FAILED: new file %s (%.2f MB, %d records) is dramatically smaller than "+
-						"existing file (%.2f MB). This likely indicates data loss. "+
-						"Aborting to protect existing data. Check download logs for errors",
-					filename, fileSizeMB, rowsWritten,
-					float64(existingSize)/(1024*1024))
-			}
-		}
-
-		if fileSize > MaxUploadSizeBytes {
-			return nil, stats, fmt.Errorf(
-				"file %s (%.1f MB) exceeds the NGSIEM upload limit of 200 MB. "+
-					"The file contains %d IOC records. "+
-					"To reduce file size, use filters: "+
-					"1) Use 'feed_id' to limit ingestion to specific threat feeds, "+
-					"2) Use 'confidence_gte' to filter low-confidence IOCs (e.g., confidence_gte: 70), "+
-					"3) Use 'type' parameter to ingest specific IOC types separately.",
-				filename, fileSizeMB, rowsWritten)
-		}
-
-		if fileSize > WarningThresholdBytes {
-			logger.Warn("File approaching upload limit",
-				"filename", filename,
-				"size_mb", fileSizeMB)
-		}
-
 		// Update statistics
-		newUniqueAdded := len(newRows) - duplicatesUpdated
-		stats.TotalDuplicatesRemoved += duplicatesUpdated
-
-		if newUniqueAdded > 0 || (!hasExisting && len(newRows) > 0) {
+		if len(newRows) > 0 {
 			stats.FilesWithNewData++
 		}
 
-		if hasExisting {
-			logger.Info("Merged records",
+		if fileExists {
+			logger.Info("Prepared new rows for server-side update",
 				"filename", filename,
-				"existing", originalCount,
-				"new", len(newRows),
-				"total", rowsWritten,
-				"net_new", newUniqueAdded,
-				"updated", duplicatesUpdated)
+				"new_rows", rowsWritten,
+				"size_mb", fileSizeMB)
 		} else {
 			logger.Info("Created new file",
 				"filename", filename,
@@ -2420,96 +1537,60 @@ func (f *namedFile) Name() string {
 	return f.name
 }
 
-// progressReader wraps an io.Reader to track and log download progress
-type progressReader struct {
-	reader       io.Reader
-	totalBytes   int64
-	readBytes    int64
-	lastLogBytes int64
-	filename     string
-	logger       *slog.Logger
-	logInterval  int64 // Log every N bytes (e.g., 10MB)
-}
-
-func newProgressReader(r io.Reader, total int64, filename string, logger *slog.Logger) *progressReader {
-	return &progressReader{
-		reader:      r,
-		totalBytes:  total,
-		filename:    filename,
-		logger:      logger,
-		logInterval: 10 * 1024 * 1024, // Log every 10MB
-	}
-}
-
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.reader.Read(p)
-	pr.readBytes += int64(n)
-
-	// Log progress every 10MB
-	if pr.readBytes-pr.lastLogBytes >= pr.logInterval {
-		percentComplete := float64(pr.readBytes) / float64(pr.totalBytes) * 100
-		pr.logger.Info("Download progress",
-			"filename", pr.filename,
-			"bytes_downloaded", pr.readBytes,
-			"total_bytes", pr.totalBytes,
-			"percent_complete", fmt.Sprintf("%.1f%%", percentComplete),
-			"mb_downloaded", float64(pr.readBytes)/(1024*1024))
-		pr.lastLogBytes = pr.readBytes
-	}
-
-	return n, err
-}
-
-// uploadCSVFilesToNGSIEM uploads CSV files to Falcon Next-Gen SIEM as lookup files
-func uploadCSVFilesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, csvFiles []string, repository string, logger *slog.Logger) ([]map[string]interface{}, error) {
+// uploadCSVFilesToNGSIEM uploads CSV files to Falcon Next-Gen SIEM as lookup files.
+// When existingFiles contains a filename, uses update_lookup_file_entries() for
+// server-side deduplication instead of uploading full merged files.
+func uploadCSVFilesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, csvFiles []string, repository string, existingFiles map[string]bool, logger *slog.Logger) ([]map[string]interface{}, error) {
 	var results []map[string]interface{}
 
 	for _, csvFile := range csvFiles {
 		filename := filepath.Base(csvFile)
 
-		// Open the file for upload
-		file, err := os.Open(csvFile)
-		if err != nil {
-			logger.Error("Failed to open file for upload", "filename", filename, "error", err)
-			results = append(results, map[string]interface{}{
-				"file":    filename,
-				"status":  "error",
-				"message": fmt.Sprintf("Failed to open file: %v", err),
-			})
+		// Determine if this file has existing data on NGSIEM (server-side update path)
+		if existingFiles[filename] {
+			// Use UpdateLookupFileEntries API for server-side dedup
+			result, err := uploadEntriesToNGSIEM(ctx, falconClient, csvFile, filename, repository, logger)
+			if err != nil {
+				logger.Error("Failed to update file entries in NGSIEM", "filename", filename, "error", err)
+				results = append(results, map[string]interface{}{
+					"file":    filename,
+					"status":  "error",
+					"message": fmt.Sprintf("Update entries failed: %s", err.Error()),
+				})
+				continue
+			}
+			results = append(results, result)
 			continue
 		}
 
-		// Get file size for logging
-		fileInfo, err := file.Stat()
-		if err != nil {
+		// New file: use UploadLookupV1 (full upload) with retry
+		response, err := callWithRetry(ctx, logger, fmt.Sprintf("uploading %s", filename), 5, func() (*ngsiem.UploadLookupV1OK, error) {
+			file, openErr := os.Open(csvFile)
+			if openErr != nil {
+				return nil, fmt.Errorf("failed to open file: %w", openErr)
+			}
+
+			fileInfo, statErr := file.Stat()
+			if statErr != nil {
+				file.Close()
+				return nil, fmt.Errorf("failed to stat file: %w", statErr)
+			}
+
+			logger.Info("Uploading file to NGSIEM",
+				"filename", filename,
+				"repository", repository,
+				"size_bytes", fileInfo.Size(),
+				"size_mb", float64(fileInfo.Size())/(1024*1024))
+
+			namedF := &namedFile{File: file, name: filename}
+			resp, uploadErr := falconClient.Ngsiem.UploadLookupV1(&ngsiem.UploadLookupV1Params{
+				File:       namedF,
+				Repository: repository,
+				Context:    ctx,
+			})
 			file.Close()
-			logger.Error("Failed to stat file", "filename", filename, "error", err)
-			results = append(results, map[string]interface{}{
-				"file":    filename,
-				"status":  "error",
-				"message": fmt.Sprintf("Failed to stat file: %v", err),
-			})
-			continue
-		}
-
-		logger.Info("Uploading file to NGSIEM",
-			"filename", filename,
-			"repository", repository,
-			"size_bytes", fileInfo.Size(),
-			"size_mb", float64(fileInfo.Size())/(1024*1024))
-
-		// Create named file wrapper for the upload
-		namedF := &namedFile{File: file, name: filename}
-
-		// Upload using gofalcon NGSIEM client
-		response, err := falconClient.Ngsiem.UploadLookupV1(&ngsiem.UploadLookupV1Params{
-			File:       namedF,
-			Repository: repository,
-			Context:    ctx,
+			return resp, uploadErr
 		})
-
-		// Close the file after upload attempt
-		file.Close()
 
 		if err != nil {
 			logger.Error("Failed to upload file to NGSIEM", "filename", filename, "error", err)
@@ -2539,6 +1620,77 @@ func uploadCSVFilesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrik
 	}
 
 	return results, nil
+}
+
+// uploadEntriesToNGSIEM uploads a CSV file using the UpdateLookupFileEntries API for server-side dedup.
+// For existing files, it uses update_mode="update" with key_columns set to the primary column.
+func uploadEntriesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification, csvFile, filename, repository string, logger *slog.Logger) (map[string]interface{}, error) {
+	// Determine primary key column from filename
+	iocType := strings.TrimPrefix(strings.TrimSuffix(filename, ".csv"), "anomali_threatstream_")
+	mapping, ok := iocTypeMappings[iocType]
+	if !ok {
+		return nil, fmt.Errorf("unknown IOC type from filename: %s", filename)
+	}
+	keyColumn := mapping.Columns[0]
+
+	updateMode := "update"
+	ignoreCase := "false"
+
+	response, err := callWithRetry(ctx, logger, fmt.Sprintf("uploading %s", filename), 5, func() (*ngsiem.UpdateLookupFileEntriesOK, error) {
+		file, err := os.Open(csvFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open file: %w", err)
+		}
+
+		fileInfo, err := file.Stat()
+		if err != nil {
+			file.Close()
+			return nil, fmt.Errorf("failed to stat file: %w", err)
+		}
+
+		logger.Info("Updating lookup file entries via API",
+			"filename", filename,
+			"repository", repository,
+			"update_mode", updateMode,
+			"key_columns", keyColumn,
+			"size_bytes", fileInfo.Size())
+
+		namedF := &namedFile{File: file, name: filename}
+
+		params := &ngsiem.UpdateLookupFileEntriesParams{
+			File:         namedF,
+			Filename:     &filename,
+			UpdateMode:   &updateMode,
+			KeyColumns:   &keyColumn,
+			IgnoreCase:   &ignoreCase,
+			SearchDomain: &repository,
+			Context:      ctx,
+		}
+
+		resp, apiErr := falconClient.Ngsiem.UpdateLookupFileEntries(params)
+		file.Close()
+		return resp, apiErr
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("Successfully updated lookup file entries",
+		"filename", filename,
+		"repository", repository)
+
+	result := map[string]interface{}{
+		"file":        filename,
+		"status":      "success",
+		"message":     "File entries updated successfully (server-side dedup)",
+		"update_mode": updateMode,
+	}
+
+	if response != nil && response.XCSTRACEID != "" {
+		result["trace_id"] = response.XCSTRACEID
+	}
+
+	return result, nil
 }
 
 // extractNextToken extracts the next pagination token from API response metadata
@@ -2656,19 +1808,16 @@ func saveUpdateIDWithClient(ctx context.Context, storage CustomStorageClient, up
 		return err
 	}
 
-	reader := io.NopCloser(bytes.NewReader(data))
-	params := custom_storage.NewPutObjectParamsWithContext(ctx)
-	params.Body = reader
-	params.CollectionName = CollectionUpdateTracker
-	params.ObjectKey = objectKey
-
-	resp, err := storage.PutObject(params)
+	_, err = callWithRetry(ctx, logger, fmt.Sprintf("saving update_id for %s", iocType), 5, func() (*custom_storage.PutObjectOK, error) {
+		reader := io.NopCloser(bytes.NewReader(data))
+		params := custom_storage.NewPutObjectParamsWithContext(ctx)
+		params.Body = reader
+		params.CollectionName = CollectionUpdateTracker
+		params.ObjectKey = objectKey
+		return storage.PutObject(params)
+	})
 	if err != nil {
 		return err
-	}
-
-	if resp == nil {
-		return fmt.Errorf("failed to save update_id: nil response")
 	}
 
 	logger.Info("Successfully saved update_id", "type", iocType)

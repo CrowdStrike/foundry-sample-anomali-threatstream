@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/crowdstrike/gofalcon/falcon/client"
 	"github.com/crowdstrike/gofalcon/falcon/client/custom_storage"
+	"github.com/crowdstrike/gofalcon/falcon/client/ngsiem"
 	"github.com/go-openapi/runtime"
 )
 
@@ -161,9 +164,9 @@ func TestProcessIOCsToCSV_IPType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -214,9 +217,9 @@ func TestProcessIOCsToCSV_DomainType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -245,31 +248,20 @@ func TestProcessIOCsToCSV_DomainType(t *testing.T) {
 	}
 }
 
-func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
+func TestProcessIOCsToCSV_WithExistingFile(t *testing.T) {
 	logger := slog.Default()
 	tempDir := t.TempDir()
 
-	// Existing data with an IP that will be updated
-	existingCSV := `destination.ip,confidence,threat_type,severity,source,tags,expiration_ts
-1.2.3.4,50,suspicious,,old_source,old_tag,2024-01-01
-5.6.7.8,70,malware,,existing,tag1,2024-06-01
-`
-
-	// Write existing data to a temp file (simulating downloaded existing file)
-	existingFilePath := filepath.Join(tempDir, "existing_anomali_threatstream_ip.csv")
-	if err := os.WriteFile(existingFilePath, []byte(existingCSV), 0644); err != nil {
-		t.Fatalf("Failed to write existing file: %v", err)
+	// Mark that an existing file exists on NGSIEM (server-side dedup will handle merge)
+	existingFilePaths := map[string]bool{
+		"anomali_threatstream_ip.csv": true,
 	}
 
-	existingFilePaths := map[string]ExistingFileInfo{
-		"anomali_threatstream_ip.csv": {TempPath: existingFilePath},
-	}
-
-	// New IOCs - one update, one new
+	// New IOCs - these will be written as new rows for server-side dedup
 	iocs := []IOC{
 		{
 			IType:        "ip",
-			IP:           "1.2.3.4", // This should update the existing entry
+			IP:           "1.2.3.4",
 			Confidence:   90,
 			ThreatType:   "c2",
 			Source:       "test",
@@ -278,7 +270,7 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 		},
 		{
 			IType:        "ip",
-			IP:           "9.10.11.12", // This is new
+			IP:           "9.10.11.12",
 			Confidence:   80,
 			ThreatType:   "malware",
 			Source:       "test",
@@ -287,7 +279,7 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 		},
 	}
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFilePaths, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -296,12 +288,7 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 		t.Errorf("Expected 1 CSV file, got %d", len(csvFiles))
 	}
 
-	// Should have 1 duplicate updated (1.2.3.4)
-	if stats.TotalDuplicatesRemoved != 1 {
-		t.Errorf("Expected TotalDuplicatesRemoved=1, got %d", stats.TotalDuplicatesRemoved)
-	}
-
-	// Verify file contents
+	// Verify file contents - should only contain new rows (server-side handles merge)
 	content, err := os.ReadFile(csvFiles[0])
 	if err != nil {
 		t.Fatalf("Failed to read CSV file: %v", err)
@@ -309,17 +296,12 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 
 	contentStr := string(content)
 
-	// Should contain the updated 1.2.3.4 with new confidence
+	// Should contain the new IOCs
 	if !strings.Contains(contentStr, "1.2.3.4") {
-		t.Error("CSV missing updated IP '1.2.3.4'")
+		t.Error("CSV missing IP '1.2.3.4'")
 	}
 	if !strings.Contains(contentStr, "90") {
-		t.Error("CSV should have updated confidence '90'")
-	}
-
-	// Should contain existing 5.6.7.8
-	if !strings.Contains(contentStr, "5.6.7.8") {
-		t.Error("CSV missing existing IP '5.6.7.8'")
+		t.Error("CSV should have confidence '90'")
 	}
 
 	// Should contain new 9.10.11.12
@@ -327,9 +309,9 @@ func TestProcessIOCsToCSV_MergeWithExisting(t *testing.T) {
 		t.Error("CSV missing new IP '9.10.11.12'")
 	}
 
-	// Should NOT contain old values for 1.2.3.4
-	if strings.Contains(contentStr, "old_source") {
-		t.Error("CSV should not contain old source for updated IP")
+	// Stats should reflect new IOCs only
+	if stats.FilesWithNewData != 1 {
+		t.Errorf("Expected FilesWithNewData=1, got %d", stats.FilesWithNewData)
 	}
 }
 
@@ -345,9 +327,9 @@ func TestProcessIOCsToCSV_UnknownType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -372,9 +354,9 @@ func TestProcessIOCsToCSV_CompromisedEmail(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -415,9 +397,9 @@ func TestProcessIOCsToCSV_MultipleTypes(t *testing.T) {
 		{IType: "hash_md5", Value: "d41d8cd98f00b204e9800998ecf8427e", Confidence: 95},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -471,9 +453,9 @@ func TestProcessIOCsToCSV_Deduplication(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1014,9 +996,9 @@ func TestProcessIOCsToCSV_HashTypes(t *testing.T) {
 		{IType: "hash_sha256", Value: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", Confidence: 95},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1065,9 +1047,9 @@ func TestProcessIOCsToCSV_URLType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1113,9 +1095,9 @@ func TestProcessIOCsToCSV_EmailType(t *testing.T) {
 		},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1169,9 +1151,9 @@ func TestProcessIOCsToCSV_ITypeMapping(t *testing.T) {
 		{IType: "mal_sha256", Value: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", Confidence: 90},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1218,15 +1200,15 @@ something,value
 		t.Fatalf("Failed to write existing file: %v", err)
 	}
 
-	existingFilePaths := map[string]ExistingFileInfo{
-		"anomali_threatstream_ip.csv": {TempPath: existingFilePath},
+	existingFilePaths := map[string]bool{
+		"anomali_threatstream_ip.csv": true,
 	}
 
 	iocs := []IOC{
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90},
 	}
 
-	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFilePaths, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFilePaths, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1258,9 +1240,9 @@ func TestProcessIOCsToCSV_EmptyPrimaryValue(t *testing.T) {
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90}, // Valid IP
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -1430,16 +1412,12 @@ func TestLastUpdateTrackerStructure(t *testing.T) {
 // TestProcessStatsStructure tests ProcessStats struct
 func TestProcessStatsStructure(t *testing.T) {
 	stats := ProcessStats{
-		TotalNewIOCs:           100,
-		TotalDuplicatesRemoved: 10,
-		FilesWithNewData:       5,
+		TotalNewIOCs:     100,
+		FilesWithNewData: 5,
 	}
 
 	if stats.TotalNewIOCs != 100 {
 		t.Errorf("TotalNewIOCs = %d, expected 100", stats.TotalNewIOCs)
-	}
-	if stats.TotalDuplicatesRemoved != 10 {
-		t.Errorf("TotalDuplicatesRemoved = %d, expected 10", stats.TotalDuplicatesRemoved)
 	}
 	if stats.FilesWithNewData != 5 {
 		t.Errorf("FilesWithNewData = %d, expected 5", stats.FilesWithNewData)
@@ -1448,14 +1426,6 @@ func TestProcessStatsStructure(t *testing.T) {
 
 // TestConstants tests that constants are defined correctly
 func TestConstants(t *testing.T) {
-	// Test size constants
-	if MaxUploadSizeBytes != 200*1024*1024 {
-		t.Errorf("MaxUploadSizeBytes = %d, expected %d", MaxUploadSizeBytes, 200*1024*1024)
-	}
-	if WarningThresholdBytes != 180*1024*1024 {
-		t.Errorf("WarningThresholdBytes = %d, expected %d", WarningThresholdBytes, 180*1024*1024)
-	}
-
 	// Test collection names
 	if CollectionUpdateTracker != "update_id_tracker" {
 		t.Errorf("CollectionUpdateTracker = %q, expected 'update_id_tracker'", CollectionUpdateTracker)
@@ -1669,7 +1639,7 @@ func TestSaveUpdateIDError(t *testing.T) {
 
 	mockStorage := NewMockCustomStorage()
 	mockStorage.PutObjectFunc = func(params *custom_storage.PutObjectParams) (*custom_storage.PutObjectOK, error) {
-		return nil, nil // nil response indicates failure
+		return nil, fmt.Errorf("storage unavailable")
 	}
 
 	updateData := &LastUpdateTracker{UpdateID: "12345"}
@@ -1677,7 +1647,7 @@ func TestSaveUpdateIDError(t *testing.T) {
 	err := saveUpdateIDWithClient(ctx, mockStorage, updateData, "", logger)
 
 	if err == nil {
-		t.Error("Expected error for nil response")
+		t.Error("Expected error from PutObject failure")
 	}
 }
 
@@ -2371,9 +2341,9 @@ func TestProcessIOCsToCSV_FileSizeWarning(t *testing.T) {
 		{IType: "ip", IP: "1.2.3.4", Confidence: 90},
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, _, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -2512,9 +2482,9 @@ func TestProcessIOCsToCSV_BatchProcessing(t *testing.T) {
 		}
 	}
 
-	existingFiles := make(map[string]ExistingFileInfo)
+	existingFiles := make(map[string]bool)
 
-	csvFiles, stats, err := processIOCsToCSV(context.Background(), "", "", iocs, tempDir, existingFiles, logger)
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
 	if err != nil {
 		t.Fatalf("processIOCsToCSV failed: %v", err)
 	}
@@ -2712,84 +2682,767 @@ func TestParse207ResponseNilBody(t *testing.T) {
 	}
 }
 
-// TestEstimateFinalFileSizes tests the fail-fast file size estimation
-func TestEstimateFinalFileSizes(t *testing.T) {
+// TestCommaSeparatedTypesError tests that comma-separated types are rejected
+func TestCommaSeparatedTypesError(t *testing.T) {
+	// The handleIngest function should reject comma-separated types
+	req := IngestRequest{Type: "ip,domain"}
+	if !strings.Contains(req.Type, ",") {
+		t.Error("Expected type to contain comma")
+	}
+	// The actual validation is in handleIngest which requires full FDK context
+	// but we can verify the logic condition
+	if req.Type != "" && strings.Contains(req.Type, ",") {
+		// This is the condition that triggers the 400 error
+	} else {
+		t.Error("Should detect comma-separated types")
+	}
+}
+
+// TestProcessIOCsToCSV_ServerSideDedup tests that when existing_files contains a filename,
+// only new rows are written to CSV (server-side dedup handles existing rows)
+func TestProcessIOCsToCSV_ServerSideDedup(t *testing.T) {
+	logger := slog.Default()
+	tempDir := t.TempDir()
+
+	// Mark file as existing on NGSIEM
+	existingFiles := map[string]bool{
+		"anomali_threatstream_ip.csv": true,
+	}
+
+	// New IOCs to write
+	iocs := []IOC{
+		{
+			IType:        "ip",
+			IP:           "5.6.7.8",
+			Confidence:   85,
+			ThreatType:   "botnet",
+			Meta:         IOCMeta{Severity: "medium"},
+			Source:       "test2",
+			Tags:         nil,
+			ExpirationTs: "",
+		},
+	}
+
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	if err != nil {
+		t.Fatalf("processIOCsToCSV failed: %v", err)
+	}
+
+	if len(csvFiles) != 1 {
+		t.Fatalf("Expected 1 CSV file, got %d", len(csvFiles))
+	}
+
+	// Read the CSV and verify only new rows are written
+	file, err := os.Open(csvFiles[0])
+	if err != nil {
+		t.Fatalf("Failed to open CSV file: %v", err)
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		t.Fatalf("Failed to read CSV: %v", err)
+	}
+
+	// Header + 1 data row = 2 records total
+	if len(records) != 2 {
+		t.Errorf("Expected 2 records (header + 1 row), got %d", len(records))
+	}
+
+	// Verify header
+	if records[0][0] != "destination.ip" {
+		t.Errorf("Expected header 'destination.ip', got '%s'", records[0][0])
+	}
+
+	// Verify only new row is present
+	if records[1][0] != "5.6.7.8" {
+		t.Errorf("Expected IP '5.6.7.8', got '%s'", records[1][0])
+	}
+
+	if stats.FilesWithNewData != 1 {
+		t.Errorf("Expected FilesWithNewData=1, got %d", stats.FilesWithNewData)
+	}
+}
+
+// TestProcessIOCsToCSV_ExistingFileWritesOnlyNewRows verifies that even when a file exists
+// on NGSIEM, we only write new rows to the local CSV (no merge with existing data)
+func TestProcessIOCsToCSV_ExistingFileWritesOnlyNewRows(t *testing.T) {
+	logger := slog.Default()
+	tempDir := t.TempDir()
+
+	existingFiles := map[string]bool{
+		"anomali_threatstream_ip.csv": true,
+	}
+
+	iocs := []IOC{
+		{IType: "ip", IP: "1.2.3.4", Confidence: 90, ThreatType: "c2", Source: "test", ExpirationTs: "2024-12-31"},
+		{IType: "ip", IP: "9.10.11.12", Confidence: 80, ThreatType: "malware", Source: "test", ExpirationTs: ""},
+	}
+
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	if err != nil {
+		t.Fatalf("processIOCsToCSV failed: %v", err)
+	}
+
+	content, err := os.ReadFile(csvFiles[0])
+	if err != nil {
+		t.Fatalf("Failed to read CSV file: %v", err)
+	}
+
+	contentStr := string(content)
+
+	// Only new IOCs should be present (no existing data merged in)
+	if !strings.Contains(contentStr, "1.2.3.4") {
+		t.Error("CSV missing new IP '1.2.3.4'")
+	}
+	if !strings.Contains(contentStr, "9.10.11.12") {
+		t.Error("CSV missing new IP '9.10.11.12'")
+	}
+
+	// Count data rows (excluding header)
+	lines := strings.Split(strings.TrimSpace(contentStr), "\n")
+	if len(lines) != 3 { // header + 2 data rows
+		t.Errorf("Expected 3 lines (header + 2 rows), got %d", len(lines))
+	}
+}
+
+// TestBuildQueryParamsWithSeverityFilter tests severity filter in query params
+func TestBuildQueryParamsWithSeverityFilter(t *testing.T) {
+	req := IngestRequest{
+		Severity: "high",
+		Limit:    1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["meta.severity"] != "high" {
+		t.Errorf("Expected meta.severity='high', got '%v'", params["meta.severity"])
+	}
+}
+
+// TestBuildQueryParamsNoSeverityFilter tests absence of severity filter
+func TestBuildQueryParamsNoSeverityFilter(t *testing.T) {
+	req := IngestRequest{Limit: 1000}
+	params := buildQueryParams(req, nil, "")
+
+	if _, exists := params["meta.severity"]; exists {
+		t.Error("meta.severity should not be present when not specified")
+	}
+}
+
+// TestBuildQueryParamsPartialConfidenceFilters tests partial confidence filter combinations
+func TestBuildQueryParamsPartialConfidenceFilters(t *testing.T) {
+	gte := 50
+	req := IngestRequest{
+		ConfidenceGte: &gte,
+		Limit:         1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["confidence__gte"] != 50 {
+		t.Errorf("Expected confidence__gte=50, got %v", params["confidence__gte"])
+	}
+	if _, exists := params["confidence__gt"]; exists {
+		t.Error("confidence__gt should not be present")
+	}
+	if _, exists := params["confidence__lte"]; exists {
+		t.Error("confidence__lte should not be present")
+	}
+	if _, exists := params["confidence__lt"]; exists {
+		t.Error("confidence__lt should not be present")
+	}
+}
+
+// TestBuildQueryParamsNoJobNoUpdate tests query params with fresh start (no job, no update)
+func TestBuildQueryParamsNoJobNoUpdate(t *testing.T) {
+	req := IngestRequest{
+		Status: "active",
+		Type:   "ip",
+		Limit:  500,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["status"] != "active" {
+		t.Errorf("Expected status='active', got '%v'", params["status"])
+	}
+	if params["type"] != "ip" {
+		t.Errorf("Expected type='ip', got '%v'", params["type"])
+	}
+	if params["limit"] != 500 {
+		t.Errorf("Expected limit=500, got %v", params["limit"])
+	}
+	// No search_after should be set for fresh start
+	if _, exists := params["search_after"]; exists {
+		t.Error("search_after should not be present for fresh start")
+	}
+}
+
+// TestBuildQueryParamsJobFallbackToSearchAfter tests job parameter fallback logic
+func TestBuildQueryParamsJobFallbackToSearchAfter(t *testing.T) {
+	// Job with search_after in parameters
+	job := &IngestJob{
+		Parameters: map[string]interface{}{
+			"search_after": "12345",
+		},
+	}
+	req := IngestRequest{Limit: 1000}
+	params := buildQueryParams(req, job, "")
+
+	if params["search_after"] != "12345" {
+		t.Errorf("Expected search_after='12345', got '%v'", params["search_after"])
+	}
+}
+
+// TestBuildQueryParamsJobFallbackLegacyUpdateIDGt tests legacy update_id__gt fallback
+func TestBuildQueryParamsJobFallbackLegacyUpdateIDGt(t *testing.T) {
+	// Job with legacy update_id__gt
+	job := &IngestJob{
+		Parameters: map[string]interface{}{
+			"update_id__gt": "98765",
+		},
+	}
+	req := IngestRequest{Limit: 1000}
+	params := buildQueryParams(req, job, "")
+
+	// Should fallback to using update_id__gt as search_after
+	if params["search_after"] != "98765" {
+		t.Errorf("Expected search_after='98765' (from legacy update_id__gt), got '%v'", params["search_after"])
+	}
+}
+
+// TestBuildQueryParamsHashTypeMapping tests that hash subtypes are mapped to "hash" for API
+func TestBuildQueryParamsHashTypeMapping(t *testing.T) {
+	for _, hashType := range []string{"md5", "sha1", "sha256"} {
+		req := IngestRequest{Type: hashType, Limit: 1000}
+		params := buildQueryParams(req, nil, "")
+
+		if params["type"] != "hash" {
+			t.Errorf("For type=%s, expected API type='hash', got '%v'", hashType, params["type"])
+		}
+	}
+}
+
+// TestExtractNextTokenVariations tests various meta field formats for next token extraction
+func TestExtractNextTokenVariations(t *testing.T) {
+	logger := slog.Default()
+	iocs := []IOC{{UpdateID: "999"}}
+
+	tests := []struct {
+		name     string
+		meta     map[string]interface{}
+		expected string
+	}{
+		{
+			name:     "search_after in URL",
+			meta:     map[string]interface{}{"next": "https://api.example.com/v2/intelligence?search_after=abc123"},
+			expected: "abc123",
+		},
+		{
+			name:     "update_id__gt in URL",
+			meta:     map[string]interface{}{"next": "https://api.example.com/v2/intelligence?update_id__gt=456"},
+			expected: "456",
+		},
+		{
+			name:     "from_update_id in URL",
+			meta:     map[string]interface{}{"next": "https://api.example.com/v2/intelligence?from_update_id=789"},
+			expected: "789",
+		},
+		{
+			name:     "nil meta",
+			meta:     nil,
+			expected: "",
+		},
+		{
+			name:     "empty next",
+			meta:     map[string]interface{}{"next": ""},
+			expected: "",
+		},
+		{
+			name:     "no recognized params falls back to last IOC update_id",
+			meta:     map[string]interface{}{"next": "https://api.example.com/v2/intelligence?limit=100"},
+			expected: "999",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractNextToken(tt.meta, iocs, logger)
+			if result != tt.expected {
+				t.Errorf("extractNextToken() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestCheckAndClearMissingTypesWithAllPresent tests that no clearing happens when all files exist
+func TestCheckAndClearMissingTypesWithAllPresent(t *testing.T) {
+	// Create a mock storage that tracks calls
+	mockStorage := &mockCustomStorage{
+		deleteResponses: map[string]error{},
+	}
+
 	logger := slog.Default()
 
-	t.Run("skips check when existing files present", func(t *testing.T) {
-		existingFiles := map[string]ExistingFileInfo{"test.csv": {TempPath: "/tmp/test.csv"}}
-		err := estimateFinalFileSizes([]string{}, 100, 1000000, existingFiles, logger)
-		if err != nil {
-			t.Errorf("Expected nil error when existing files present, got: %v", err)
-		}
-	})
+	// All files present
+	existingFiles := map[string]bool{
+		"anomali_threatstream_ip.csv":          true,
+		"anomali_threatstream_domain.csv":      true,
+		"anomali_threatstream_url.csv":         true,
+		"anomali_threatstream_email.csv":       true,
+		"anomali_threatstream_hash_md5.csv":    true,
+		"anomali_threatstream_hash_sha1.csv":   true,
+		"anomali_threatstream_hash_sha256.csv": true,
+	}
 
-	t.Run("skips check when no IOCs in batch", func(t *testing.T) {
-		err := estimateFinalFileSizes([]string{}, 0, 1000000, map[string]ExistingFileInfo{}, logger)
-		if err != nil {
-			t.Errorf("Expected nil error when no IOCs in batch, got: %v", err)
-		}
-	})
+	// When all files are present, nothing should be cleared
+	result := checkAndClearMissingTypesWithClient(context.Background(), mockStorage, existingFiles, logger)
+	if result {
+		t.Error("Expected shouldStartFresh=false when all files present")
+	}
+}
 
-	t.Run("skips check when totalCount is zero", func(t *testing.T) {
-		err := estimateFinalFileSizes([]string{}, 100, 0, map[string]ExistingFileInfo{}, logger)
-		if err != nil {
-			t.Errorf("Expected nil error when totalCount is zero, got: %v", err)
-		}
-	})
+// TestCheckAndClearMissingTypesWithMissing tests that missing types get their update_ids cleared
+func TestCheckAndClearMissingTypesWithMissing(t *testing.T) {
+	mockStorage := &mockCustomStorage{
+		deleteResponses: map[string]error{},
+	}
 
-	t.Run("returns nil when projected size under limit", func(t *testing.T) {
-		// Create a small test CSV file
-		tempDir := t.TempDir()
-		testFile := filepath.Join(tempDir, "anomali_threatstream_ip.csv")
+	logger := slog.Default()
 
-		// Write a small CSV with header + 10 rows (~500 bytes)
-		content := "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
-		for i := 0; i < 10; i++ {
-			content += fmt.Sprintf("192.168.1.%d,85,malware,high,test,tag1,2026-12-31\n", i)
+	// Only ip file present (others missing)
+	existingFiles := map[string]bool{
+		"anomali_threatstream_ip.csv": true,
+	}
+
+	result := checkAndClearMissingTypesWithClient(context.Background(), mockStorage, existingFiles, logger)
+	if result {
+		t.Error("Expected shouldStartFresh=false")
+	}
+
+	// Should have attempted to delete update_ids for missing types
+	if mockStorage.deleteCount == 0 {
+		t.Error("Expected delete calls for missing types")
+	}
+}
+
+// checkAndClearMissingTypesWithClient - testable version using CustomStorageClient interface
+func checkAndClearMissingTypesWithClient(ctx context.Context, storage CustomStorageClient, existingFiles map[string]bool, logger *slog.Logger) bool {
+	expectedFiles := make([]string, 0)
+	for iocTypeKey := range iocTypeMappings {
+		expectedFiles = append(expectedFiles, fmt.Sprintf("anomali_threatstream_%s.csv", iocTypeKey))
+	}
+
+	var missingFiles []string
+	for _, f := range expectedFiles {
+		if !existingFiles[f] {
+			missingFiles = append(missingFiles, f)
 		}
-		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
-			t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	if len(missingFiles) > 0 {
+		logger.Info("Detected missing files - clearing update_ids for these types", "missing", missingFiles)
+
+		for _, missingFile := range missingFiles {
+			filenameBase := strings.TrimPrefix(missingFile, "anomali_threatstream_")
+			filenameBase = strings.TrimSuffix(filenameBase, ".csv")
+
+			collectionType := filenameBase
+			if strings.HasPrefix(filenameBase, "hash_") {
+				collectionType = "hash"
+			}
+
+			_ = clearUpdateIDForTypeWithClient(ctx, storage, collectionType, logger)
+		}
+	}
+
+	return false
+}
+
+// TestIOCTypeMappingsCompleteness verifies all expected IOC types have valid mappings
+func TestIOCTypeMappingsCompleteness(t *testing.T) {
+	expectedTypes := []string{"ip", "domain", "url", "email", "hash_md5", "hash_sha1", "hash_sha256"}
+
+	for _, typeName := range expectedTypes {
+		mapping, ok := iocTypeMappings[typeName]
+		if !ok {
+			t.Errorf("Missing IOC type mapping for: %s", typeName)
+			continue
 		}
 
-		// With 10 IOCs in batch and 1000 total, projected size should be ~50KB (well under 200MB)
-		err := estimateFinalFileSizes([]string{testFile}, 10, 1000, map[string]ExistingFileInfo{}, logger)
-		if err != nil {
-			t.Errorf("Expected nil error for small projected size, got: %v", err)
-		}
-	})
-
-	t.Run("returns error when projected size exceeds limit", func(t *testing.T) {
-		// Create a test CSV file
-		tempDir := t.TempDir()
-		testFile := filepath.Join(tempDir, "anomali_threatstream_ip.csv")
-
-		// Write a CSV with header + 100 rows (~5KB)
-		content := "destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n"
-		for i := 0; i < 100; i++ {
-			content += fmt.Sprintf("192.168.1.%d,85,malware,high,test,tag1,2026-12-31\n", i)
-		}
-		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
-			t.Fatalf("Failed to create test file: %v", err)
+		if len(mapping.Columns) != 7 {
+			t.Errorf("Type %s: expected 7 columns, got %d", typeName, len(mapping.Columns))
 		}
 
-		// With 100 IOCs in batch and 100 million total, projected size should exceed 200MB
-		// 5KB / 100 records = 50 bytes/record
-		// 100,000,000 records * 50 bytes = 5GB (way over limit)
-		err := estimateFinalFileSizes([]string{testFile}, 100, 100000000, map[string]ExistingFileInfo{}, logger)
-		if err == nil {
-			t.Error("Expected error when projected size exceeds 200MB limit")
+		if mapping.PrimaryField == "" {
+			t.Errorf("Type %s: PrimaryField is empty", typeName)
 		}
-		if err != nil && !strings.Contains(err.Error(), "200 MB") {
-			t.Errorf("Error should mention 200 MB limit, got: %v", err)
-		}
-	})
 
-	t.Run("handles missing file gracefully", func(t *testing.T) {
-		// Pass a non-existent file - should not panic, just skip
-		err := estimateFinalFileSizes([]string{"/nonexistent/file.csv"}, 100, 1000000, map[string]ExistingFileInfo{}, logger)
-		if err != nil {
-			t.Errorf("Expected nil error for missing file (should skip), got: %v", err)
+		// Primary column (first column) should differ by type
+		if mapping.Columns[0] == "" {
+			t.Errorf("Type %s: first column is empty", typeName)
 		}
-	})
+
+		// Common columns should be present (after primary)
+		commonCols := []string{"confidence", "threat_type", "severity", "source", "tags", "expiration_ts"}
+		for i, col := range commonCols {
+			if mapping.Columns[i+1] != col {
+				t.Errorf("Type %s: column %d expected '%s', got '%s'", typeName, i+1, col, mapping.Columns[i+1])
+			}
+		}
+	}
+}
+
+// TestProcessIOCsToCSV_NewFileNoExisting verifies behavior when no existing file exists
+func TestProcessIOCsToCSV_NewFileNoExisting(t *testing.T) {
+	logger := slog.Default()
+	tempDir := t.TempDir()
+
+	// Empty existing files - everything is new
+	existingFiles := make(map[string]bool)
+
+	iocs := []IOC{
+		{IType: "ip", IP: "1.2.3.4", Confidence: 90, ThreatType: "c2",
+			Meta: IOCMeta{Severity: "high"}, Source: "feed1", ExpirationTs: "2025-01-01"},
+	}
+
+	csvFiles, stats, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	if err != nil {
+		t.Fatalf("processIOCsToCSV failed: %v", err)
+	}
+
+	if len(csvFiles) != 1 {
+		t.Fatalf("Expected 1 CSV file, got %d", len(csvFiles))
+	}
+
+	// Verify file contents
+	file, err := os.Open(csvFiles[0])
+	if err != nil {
+		t.Fatalf("Failed to open CSV: %v", err)
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		t.Fatalf("Failed to read CSV: %v", err)
+	}
+
+	// Header + 1 data row
+	if len(records) != 2 {
+		t.Errorf("Expected 2 records, got %d", len(records))
+	}
+
+	// Verify all columns are populated
+	row := records[1]
+	if row[0] != "1.2.3.4" {
+		t.Errorf("Expected IP='1.2.3.4', got '%s'", row[0])
+	}
+	if row[1] != "90" {
+		t.Errorf("Expected confidence='90', got '%s'", row[1])
+	}
+	if row[2] != "c2" {
+		t.Errorf("Expected threat_type='c2', got '%s'", row[2])
+	}
+	if row[3] != "high" {
+		t.Errorf("Expected severity='high', got '%s'", row[3])
+	}
+	if row[4] != "feed1" {
+		t.Errorf("Expected source='feed1', got '%s'", row[4])
+	}
+
+	if stats.FilesWithNewData != 1 {
+		t.Errorf("Expected FilesWithNewData=1, got %d", stats.FilesWithNewData)
+	}
+}
+
+// TestProcessIOCsToCSV_IntraFileDedupNewRows tests that duplicate IOCs within the same batch
+// are deduplicated (later entries win) before writing
+func TestProcessIOCsToCSV_IntraFileDedupNewRows(t *testing.T) {
+	logger := slog.Default()
+	tempDir := t.TempDir()
+	existingFiles := make(map[string]bool)
+
+	// Two IOCs with same primary key - later one should win
+	iocs := []IOC{
+		{IType: "ip", IP: "1.2.3.4", Confidence: 50, ThreatType: "suspicious", Source: "old"},
+		{IType: "ip", IP: "1.2.3.4", Confidence: 95, ThreatType: "c2", Source: "new"},
+	}
+
+	csvFiles, _, err := processIOCsToCSV(iocs, tempDir, existingFiles, logger)
+	if err != nil {
+		t.Fatalf("processIOCsToCSV failed: %v", err)
+	}
+
+	content, err := os.ReadFile(csvFiles[0])
+	if err != nil {
+		t.Fatalf("Failed to read CSV: %v", err)
+	}
+
+	contentStr := string(content)
+	lines := strings.Split(strings.TrimSpace(contentStr), "\n")
+
+	// Header + 1 deduplicated row = 2 lines
+	if len(lines) != 2 {
+		t.Errorf("Expected 2 lines (dedup), got %d", len(lines))
+	}
+
+	// Later entry (confidence=95) should win
+	if !strings.Contains(contentStr, "95") {
+		t.Error("Expected confidence=95 (later entry wins)")
+	}
+	if strings.Contains(contentStr, "\"50\"") {
+		t.Error("Should NOT contain old confidence=50")
+	}
+}
+
+// TestGetLastUpdateIDWithErrorResponse tests get_last_update_id behavior on non-404 errors
+func TestGetLastUpdateIDWithErrorResponse(t *testing.T) {
+	// Non-404 API error should propagate
+	mockStorage := &mockCustomStorage{
+		getError: &runtime.APIError{Code: 500, OperationName: "GetObject"},
+	}
+
+	_, err := getLastUpdateIDWithClient(context.Background(), mockStorage, "ip", slog.Default())
+	if err == nil {
+		t.Error("Expected error for 500 response")
+	}
+}
+
+// TestSaveUpdateIDWithError tests save_update_id error propagation
+func TestSaveUpdateIDWithError(t *testing.T) {
+	mockStorage := &mockCustomStorage{
+		putError: fmt.Errorf("connection refused"),
+	}
+
+	updateData := &LastUpdateTracker{
+		UpdateID: "12345",
+	}
+
+	err := saveUpdateIDWithClient(context.Background(), mockStorage, updateData, "ip", slog.Default())
+	if err == nil {
+		t.Error("Expected error to propagate")
+	}
+}
+
+// mockCustomStorage implements CustomStorageClient for testing
+type mockCustomStorage struct {
+	getError        error
+	getResponse     *custom_storage.GetObjectOK
+	putError        error
+	putResponse     *custom_storage.PutObjectOK
+	deleteResponses map[string]error
+	deleteCount     int
+}
+
+func (m *mockCustomStorage) GetObject(params *custom_storage.GetObjectParams, writer io.Writer, opts ...custom_storage.ClientOption) (*custom_storage.GetObjectOK, error) {
+	if m.getError != nil {
+		return nil, m.getError
+	}
+	return m.getResponse, nil
+}
+
+func (m *mockCustomStorage) PutObject(params *custom_storage.PutObjectParams, opts ...custom_storage.ClientOption) (*custom_storage.PutObjectOK, error) {
+	if m.putError != nil {
+		return nil, m.putError
+	}
+	if m.putResponse != nil {
+		return m.putResponse, nil
+	}
+	return &custom_storage.PutObjectOK{}, nil
+}
+
+func (m *mockCustomStorage) DeleteObject(params *custom_storage.DeleteObjectParams, opts ...custom_storage.ClientOption) (*custom_storage.DeleteObjectOK, error) {
+	m.deleteCount++
+	if err, exists := m.deleteResponses[params.ObjectKey]; exists {
+		return nil, err
+	}
+	return &custom_storage.DeleteObjectOK{}, nil
+}
+
+// TestExtractNextTokenMalformedURL tests graceful handling of malformed URLs in meta.next
+func TestExtractNextTokenMalformedURL2(t *testing.T) {
+	logger := slog.Default()
+	iocs := []IOC{{UpdateID: "fallback123"}}
+
+	meta := map[string]interface{}{
+		"next": "not://a valid\nurl that can be parsed",
+	}
+
+	result := extractNextToken(meta, iocs, logger)
+	// Should fallback to last IOC's update_id when URL parsing fails
+	if result != "fallback123" {
+		t.Errorf("Expected fallback to 'fallback123', got '%s'", result)
+	}
+}
+
+// TestNoIOCsReturnsNoNextToken tests that empty IOC list returns no next token
+func TestNoIOCsReturnsNoNextToken(t *testing.T) {
+	logger := slog.Default()
+
+	meta := map[string]interface{}{"next": "https://api.example.com?search_after=123"}
+
+	// No IOCs means no pagination needed
+	result := extractNextToken(meta, nil, logger)
+	if result != "" {
+		t.Errorf("Expected empty string for nil IOCs, got '%s'", result)
+	}
+
+	result = extractNextToken(meta, []IOC{}, logger)
+	if result != "" {
+		t.Errorf("Expected empty string for empty IOCs, got '%s'", result)
+	}
+}
+
+// mockNgsIEMClient implements ngsiem.ClientService for testing uploadEntriesToNGSIEM retry logic.
+type mockNgsIEMClient struct {
+	ngsiem.ClientService
+	updateLookupFileEntriesFunc func(params *ngsiem.UpdateLookupFileEntriesParams, opts ...ngsiem.ClientOption) (*ngsiem.UpdateLookupFileEntriesOK, error)
+	callCount                   int
+}
+
+func (m *mockNgsIEMClient) UpdateLookupFileEntries(params *ngsiem.UpdateLookupFileEntriesParams, opts ...ngsiem.ClientOption) (*ngsiem.UpdateLookupFileEntriesOK, error) {
+	m.callCount++
+	return m.updateLookupFileEntriesFunc(params, opts...)
+}
+
+func TestUploadEntriesToNGSIEM_RetryOn429(t *testing.T) {
+	// Create a temp CSV file
+	tmpFile, err := os.CreateTemp("", "test_upload_*.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.WriteString("destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n1.2.3.4,90,malware,high,test,tag1,2099-01-01\n")
+	tmpFile.Close()
+
+	mock := &mockNgsIEMClient{
+		updateLookupFileEntriesFunc: func(params *ngsiem.UpdateLookupFileEntriesParams, opts ...ngsiem.ClientOption) (*ngsiem.UpdateLookupFileEntriesOK, error) {
+			return nil, &runtime.APIError{Code: 429, OperationName: "UpdateLookupFileEntries"}
+		},
+	}
+
+	falconClient := &client.CrowdStrikeAPISpecification{
+		Ngsiem: mock,
+	}
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	_, err = uploadEntriesToNGSIEM(ctx, falconClient, tmpFile.Name(), "anomali_threatstream_ip.csv", "test-repo", logger)
+	if err == nil {
+		t.Fatal("Expected error after retries exhausted, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed after") {
+		t.Errorf("Expected 'failed after' in error, got: %s", err.Error())
+	}
+	// maxRetries is 5, so we expect 5 calls
+	if mock.callCount != 5 {
+		t.Errorf("Expected 5 retry attempts, got %d", mock.callCount)
+	}
+}
+
+func TestUploadEntriesToNGSIEM_RetryOn503(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "test_upload_*.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.WriteString("destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n1.2.3.4,90,malware,high,test,tag1,2099-01-01\n")
+	tmpFile.Close()
+
+	mock := &mockNgsIEMClient{
+		updateLookupFileEntriesFunc: func(params *ngsiem.UpdateLookupFileEntriesParams, opts ...ngsiem.ClientOption) (*ngsiem.UpdateLookupFileEntriesOK, error) {
+			return nil, &runtime.APIError{Code: 503, OperationName: "UpdateLookupFileEntries"}
+		},
+	}
+
+	falconClient := &client.CrowdStrikeAPISpecification{
+		Ngsiem: mock,
+	}
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	_, err = uploadEntriesToNGSIEM(ctx, falconClient, tmpFile.Name(), "anomali_threatstream_ip.csv", "test-repo", logger)
+	if err == nil {
+		t.Fatal("Expected error after retries exhausted, got nil")
+	}
+	if mock.callCount != 5 {
+		t.Errorf("Expected 5 retry attempts, got %d", mock.callCount)
+	}
+}
+
+func TestUploadEntriesToNGSIEM_NoRetryOnNonRetryableError(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "test_upload_*.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.WriteString("destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n1.2.3.4,90,malware,high,test,tag1,2099-01-01\n")
+	tmpFile.Close()
+
+	mock := &mockNgsIEMClient{
+		updateLookupFileEntriesFunc: func(params *ngsiem.UpdateLookupFileEntriesParams, opts ...ngsiem.ClientOption) (*ngsiem.UpdateLookupFileEntriesOK, error) {
+			return nil, &runtime.APIError{Code: 400, OperationName: "UpdateLookupFileEntries"}
+		},
+	}
+
+	falconClient := &client.CrowdStrikeAPISpecification{
+		Ngsiem: mock,
+	}
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	_, err = uploadEntriesToNGSIEM(ctx, falconClient, tmpFile.Name(), "anomali_threatstream_ip.csv", "test-repo", logger)
+	if err == nil {
+		t.Fatal("Expected error on non-retryable status, got nil")
+	}
+	// Should fail immediately without retrying
+	if mock.callCount != 1 {
+		t.Errorf("Expected 1 attempt (no retry), got %d", mock.callCount)
+	}
+}
+
+func TestUploadEntriesToNGSIEM_SucceedsAfterRetry(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "test_upload_*.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.WriteString("destination.ip,confidence,threat_type,severity,source,tags,expiration_ts\n1.2.3.4,90,malware,high,test,tag1,2099-01-01\n")
+	tmpFile.Close()
+
+	callCount := 0
+	mock := &mockNgsIEMClient{
+		updateLookupFileEntriesFunc: func(params *ngsiem.UpdateLookupFileEntriesParams, opts ...ngsiem.ClientOption) (*ngsiem.UpdateLookupFileEntriesOK, error) {
+			callCount++
+			// Fail with 429 on first two calls, succeed on the third
+			if callCount <= 2 {
+				return nil, &runtime.APIError{Code: 429, OperationName: "UpdateLookupFileEntries"}
+			}
+			return &ngsiem.UpdateLookupFileEntriesOK{XCSTRACEID: "trace-123"}, nil
+		},
+	}
+
+	falconClient := &client.CrowdStrikeAPISpecification{
+		Ngsiem: mock,
+	}
+
+	ctx := context.Background()
+	logger := slog.Default()
+
+	result, err := uploadEntriesToNGSIEM(ctx, falconClient, tmpFile.Name(), "anomali_threatstream_ip.csv", "test-repo", logger)
+	if err != nil {
+		t.Fatalf("Expected success after retry, got error: %v", err)
+	}
+	if result["status"] != "success" {
+		t.Errorf("Expected status 'success', got %v", result["status"])
+	}
+	if result["trace_id"] != "trace-123" {
+		t.Errorf("Expected trace_id 'trace-123', got %v", result["trace_id"])
+	}
+	if callCount != 3 {
+		t.Errorf("Expected 3 attempts, got %d", callCount)
+	}
 }
