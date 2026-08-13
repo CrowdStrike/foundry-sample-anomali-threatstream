@@ -77,6 +77,62 @@ class JobError(AnomaliFunctionError):
     """Exception for job management errors."""
 
 
+def _is_retryable_response(response: Any) -> bool:
+    """Check if an API response is a transient error that should be retried.
+
+    Retryable conditions:
+    - HTTP 429 (rate limited)
+    - HTTP 500 (internal server error / proxy error)
+    - HTTP 503 (service unavailable)
+    """
+    if not isinstance(response, dict):
+        return False
+    status_code = response.get("status_code", 0)
+    return status_code in (429, 500, 503)
+
+
+def _call_with_retry(api_call, logger: Logger, description: str,
+                     max_retries: int = 5, base_backoff: int = 5,
+                     max_backoff: int = 60):
+    """Execute an API call with retry logic for transient errors.
+
+    Args:
+        api_call: Callable that returns an API response dict.
+        logger: Logger instance.
+        description: Human-readable description for log messages (e.g. "uploading foo.csv").
+        max_retries: Maximum number of attempts.
+        base_backoff: Base backoff in seconds (doubled each attempt).
+        max_backoff: Maximum backoff in seconds.
+
+    Returns:
+        The API response dict from the successful (or final) attempt.
+
+    Raises:
+        AnomaliFunctionError: If all retries are exhausted on retryable errors.
+    """
+    for attempt in range(1, max_retries + 1):
+        response = api_call()
+
+        if not _is_retryable_response(response):
+            return response
+
+        status_code = response.get("status_code", 0) if isinstance(response, dict) else 0
+
+        if attempt == max_retries:
+            raise AnomaliFunctionError(
+                f"{description} failed with HTTP {status_code} after {max_retries} retries"
+            )
+
+        backoff = min(base_backoff * (2 ** (attempt - 1)), max_backoff)
+        logger.warning(
+            f"Retryable error (HTTP {status_code}) {description}, "
+            f"retrying in {backoff}s (attempt {attempt}/{max_retries})"
+        )
+        time.sleep(backoff)
+
+    # Should not reach here, but satisfy linters
+    return response  # pragma: no cover
+
 
 
 # IOC type mappings for CSV column headers
@@ -190,9 +246,13 @@ def save_update_id(
 
         logger.info(f"Saving update_id to collections with key {object_key}: {update_data}")
 
-        response = custom_storage.PutObject(body=update_data,
-                                            collection_name=COLLECTION_UPDATE_TRACKER,
-                                            object_key=object_key)
+        response = _call_with_retry(
+            lambda: custom_storage.PutObject(body=update_data,
+                                             collection_name=COLLECTION_UPDATE_TRACKER,
+                                             object_key=object_key),
+            logger,
+            f"saving update_id for {ioc_type or 'all types'}"
+        )
 
         if response["status_code"] != 200:
             raise CollectionError(f"Failed to save update_id: {response}")
@@ -448,7 +508,6 @@ def check_existing_file_metadata(
     """
     # pylint: disable=too-many-branches,too-many-statements
     existing_files: Set[str] = set()
-    max_retries = 5
 
     # Known Anomali lookup file names
     known_filenames = [
@@ -485,50 +544,40 @@ def check_existing_file_metadata(
     ngsiem = NGSIEM(timeout=600)
 
     for filename in filenames_to_try:
-        last_error = None
-
-        for attempt in range(1, max_retries + 1):
-            if attempt > 1:
-                backoff = min(5 * (2 ** (attempt - 2)), 60)
-                logger.info(f"Retrying metadata check for {filename} after {backoff}s "
-                            f"(attempt {attempt}/{max_retries})")
-                time.sleep(backoff)
-
-            try:
-                resp = ngsiem.list_lookup_files(
-                    filter=f"name:~'{filename}'",
+        try:
+            resp = _call_with_retry(
+                lambda f=filename: ngsiem.list_lookup_files(
+                    filter=f"name:~'{f}'",
                     search_domain=repository
+                ),
+                logger,
+                f"metadata check for {filename}"
+            )
+
+            status_code = resp.get("status_code", 0) if isinstance(resp, dict) else 0
+            if status_code not in (0, 200):
+                raise AnomaliFunctionError(
+                    f"Metadata check failed for {filename} "
+                    f"(HTTP {status_code}) - aborting to prevent data loss"
                 )
-                status_code = resp.get("status_code", 0) if isinstance(resp, dict) else 0
-                if status_code not in (0, 200):
-                    last_error = f"HTTP {status_code}"
-                    logger.warning(f"Metadata check attempt {attempt} failed for {filename}: {last_error}")
-                    continue
 
-                # Extract file list from response (resources is a list of filename strings)
-                resources = resp.get("body", {}).get("resources", []) if isinstance(resp, dict) else []
+            # Extract file list from response (resources is a list of filename strings)
+            resources = resp.get("body", {}).get("resources", []) if isinstance(resp, dict) else []
 
-                if filename not in resources:
-                    logger.info(f"File {filename} not found (will be created)")
-                    break  # Not an error, just doesn't exist
-
+            if filename not in resources:
+                logger.info(f"File {filename} not found (will be created)")
+            else:
                 existing_files.add(filename)
                 logger.info(f"File exists: {filename}")
-                break
 
-            except Exception as e:
-                last_error = str(e)
-                logger.warning(f"Error on metadata check attempt {attempt} for {filename}: {last_error}")
-                continue
-        else:
-            # All retries exhausted for this file
-            if last_error:
-                logger.error(f"Failed metadata check for {filename} after {max_retries} retries: "
-                             f"{last_error}")
-                raise AnomaliFunctionError(
-                    f"Metadata check failed for existing file {filename} after {max_retries} "
-                    f"retries: {last_error} - aborting to prevent data loss"
-                )
+        except AnomaliFunctionError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed metadata check for {filename}: {str(e)}")
+            raise AnomaliFunctionError(
+                f"Metadata check failed for {filename}: {str(e)} "
+                f"- aborting to prevent data loss"
+            ) from e
 
     return existing_files
 
@@ -744,7 +793,6 @@ def upload_entries_to_ngsiem(
     """
     ngsiem = NGSIEM()
     results = []
-    max_retries = 5
 
     for csv_file in csv_files:
         filename = os.path.basename(csv_file)
@@ -770,12 +818,10 @@ def upload_entries_to_ngsiem(
                 f"(key_column={key_column})"
             )
 
-            # Retry loop for 429/503 transient errors
-            status_code = 0
-            for attempt in range(1, max_retries + 1):
-                if filename in existing_files:
-                    # Existing file: use update mode (match on key, replace row)
-                    response = ngsiem.update_lookup_file_entries(
+            # Call with retry for transient errors (429, 503, nginx 500)
+            if filename in existing_files:
+                def _do_update():
+                    return ngsiem.update_lookup_file_entries(
                         search_domain=repository,
                         filename=filename,
                         file=file_data,
@@ -783,33 +829,17 @@ def upload_entries_to_ngsiem(
                         key_columns=key_column,
                         ignore_case="false"
                     )
-                else:
-                    # New file: use append mode
-                    response = ngsiem.update_lookup_file_entries(
+            else:
+                def _do_update():
+                    return ngsiem.update_lookup_file_entries(
                         search_domain=repository,
                         filename=filename,
                         file=file_data,
                         update_mode="append"
                     )
 
-                status_code = response.get("status_code", 0) if isinstance(response, dict) else 0
-
-                if status_code not in (429, 503):
-                    break  # Not a retryable error, proceed to response handling
-
-                # 429/503: exponential backoff and retry
-                backoff = min(5 * (2 ** (attempt - 1)), 60)
-                logger.warning(
-                    f"Retryable error (HTTP {status_code}) uploading {filename}, "
-                    f"retrying in {backoff}s (attempt {attempt}/{max_retries})"
-                )
-                time.sleep(backoff)
-            else:
-                # Exhausted all retries
-                raise AnomaliFunctionError(
-                    f"Upload failed for {filename} with HTTP {status_code} "
-                    f"after {max_retries} retries"
-                )
+            response = _call_with_retry(_do_update, logger, f"uploading {filename}")
+            status_code = response.get("status_code", 0) if isinstance(response, dict) else 0
 
             # Log the raw response for troubleshooting
             logger.info(f"update_lookup_file_entries response for {filename}: {response}")
@@ -912,41 +942,16 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
             filename = os.path.basename(csv_file)
             logger.info(f"Uploading {filename} to Falcon Next-Gen SIEM repository: {repository}")
 
-            response = ngsiem.upload_file(lookup_file=csv_file, repository=repository)
+            response = _call_with_retry(
+                lambda f=csv_file: ngsiem.upload_file(lookup_file=f, repository=repository),
+                logger,
+                f"uploading {filename}"
+            )
 
             # Log the raw response for troubleshooting
             logger.info(f"NGSIEM upload response for {filename}: {response}")
 
-            # Handle 500 errors that may be successful uploads with empty responses
-            if response["status_code"] == 500:
-                error_body = response.get("body", {})
-                errors = error_body.get("errors", [])
-
-                # Check for JSON parsing errors that indicate successful upload
-                is_likely_success = False
-                if errors:
-                    error_message = str(errors[0].get("message", "")).lower()
-                    is_likely_success = any(phrase in error_message for phrase in [
-                        "extra data: line 1 column",
-                        "expecting value: line 1 column 1 (char 0)"
-                    ])
-
-                if is_likely_success:
-                    logger.info(f"Upload successful for {filename} (recovered from parsing error)")
-                    results.append({
-                        "file": filename,
-                        "status": "success",
-                        "message": "File uploaded successfully"
-                    })
-                else:
-                    # Real 500 error
-                    results.append({
-                        "file": filename,
-                        "status": "error",
-                        "message": f"Upload failed: {errors}"
-                    })
-            elif response["status_code"] >= 400:
-                # Other 4xx errors are real failures
+            if response["status_code"] >= 400:
                 error_messages = response.get("body", {}).get("errors", [])
                 results.append({
                     "file": filename,

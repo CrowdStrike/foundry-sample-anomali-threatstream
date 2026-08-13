@@ -102,7 +102,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                                                        collection_name="update_id_tracker",
                                                        object_key="last_update")
 
-    def test_save_update_id_error(self):
+    @patch('main.time.sleep')
+    def test_save_update_id_error(self, mock_sleep):  # pylint: disable=unused-argument
         """Test save_update_id error handling."""
         mock_custom_storage = MagicMock()
         mock_logger = MagicMock()
@@ -1151,19 +1152,20 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             # Verify new IP was added
             self.assertIn("5.6.7.8", rows_by_ip)
 
+    @patch('main.time.sleep')
     @patch('main.NGSIEM')
-    def test_upload_csv_files_500_error_recovery(self, mock_ngsiem_class):
-        """Test upload recovery from 500 error with JSON parsing message."""
+    def test_upload_csv_files_500_error_retries_then_fails(self, mock_ngsiem_class, mock_sleep):  # pylint: disable=unused-argument
+        """Test upload retries on 500 then reports error after exhausting retries."""
         mock_ngsiem = MagicMock()
         mock_ngsiem_class.return_value = mock_ngsiem
         mock_logger = MagicMock()
 
-        # Mock 500 error with JSON parsing error (indicates successful upload)
+        # All calls return 500
         mock_ngsiem.upload_file.return_value = {
             "status_code": 500,
             "body": {
                 "errors": [
-                    {"message": "extra data: line 1 column 123 (char 122)"}
+                    {"message": "Internal server error"}
                 ]
             }
         }
@@ -1176,8 +1178,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 results = main.upload_csv_files_to_ngsiem([temp_file.name], "search-all", mock_logger)
 
                 self.assertEqual(len(results), 1)
-                self.assertEqual(results[0]["status"], "success")
-                self.assertEqual(results[0]["message"], "File uploaded successfully")
+                self.assertEqual(results[0]["status"], "error")
+                self.assertIn("HTTP 500", results[0]["message"])
             finally:
                 os.unlink(temp_file.name)
 
@@ -1207,7 +1209,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         # 9 keys: last_update + 8 type-specific (ip, domain, url, email, hash, hash_md5, hash_sha1, hash_sha256)
         self.assertEqual(mock_custom_storage.DeleteObject.call_count, 9)
 
-    def test_save_update_id_error_handling(self):
+    @patch('main.time.sleep')
+    def test_save_update_id_error_handling(self, mock_sleep):  # pylint: disable=unused-argument
         """Test save_update_id error handling."""
         mock_custom_storage = MagicMock()
         mock_logger = MagicMock()
@@ -1216,7 +1219,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         update_data = {"update_id": "12345"}
         mock_custom_storage.PutObject.return_value = {"status_code": 500}
 
-        with self.assertRaises(main.CollectionError):
+        with self.assertRaises(main.AnomaliFunctionError):
             main.save_update_id(mock_custom_storage, update_data, "ip", mock_logger)
 
     def test_update_job_success(self):
@@ -2186,9 +2189,10 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertNotIn("key_columns", call_kwargs)
             self.assertNotIn("ignore_case", call_kwargs)
 
+    @patch('main.time.sleep')
     @patch('main.NGSIEM')
-    def test_upload_entries_to_ngsiem_error_handling(self, mock_ngsiem_class):
-        """Test upload_entries_to_ngsiem raises on API errors (fail-fast)."""
+    def test_upload_entries_to_ngsiem_error_handling(self, mock_ngsiem_class, mock_sleep):  # pylint: disable=unused-argument
+        """Test upload_entries_to_ngsiem raises on API errors after retries exhausted."""
         mock_ngsiem = MagicMock()
         mock_ngsiem_class.return_value = mock_ngsiem
         mock_logger = MagicMock()
@@ -2215,6 +2219,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
                 )
 
             self.assertIn("HTTP 500", str(ctx.exception))
+            self.assertIn("after 5 retries", str(ctx.exception))
 
     @patch('main.time.sleep')
     @patch('main.NGSIEM')

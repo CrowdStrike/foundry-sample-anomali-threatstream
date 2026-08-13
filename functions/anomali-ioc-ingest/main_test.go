@@ -1639,7 +1639,7 @@ func TestSaveUpdateIDError(t *testing.T) {
 
 	mockStorage := NewMockCustomStorage()
 	mockStorage.PutObjectFunc = func(params *custom_storage.PutObjectParams) (*custom_storage.PutObjectOK, error) {
-		return nil, nil // nil response indicates failure
+		return nil, fmt.Errorf("storage unavailable")
 	}
 
 	updateData := &LastUpdateTracker{UpdateID: "12345"}
@@ -1647,7 +1647,7 @@ func TestSaveUpdateIDError(t *testing.T) {
 	err := saveUpdateIDWithClient(ctx, mockStorage, updateData, "", logger)
 
 	if err == nil {
-		t.Error("Expected error for nil response")
+		t.Error("Expected error from PutObject failure")
 	}
 }
 

@@ -110,7 +110,9 @@ In **test mode** (`TEST_MODE=true`), files are written to a local `test_output/`
 ### Termination Conditions
 1. **No IOCs**: API returns empty result set → Omit `next` field from response (null terminates workflow)
 2. **No meta.next**: API indicates no more data → Save state, omit `next` field from response
-3. **Workflow timeout**: 2-hour execution timeout prevents runaway loops
+3. **Loop iteration cap**: Each loop limited to 200 iterations (`max_iteration_count: 200`)
+4. **Loop time cap**: Each loop limited to 55 minutes (`max_execution_seconds: 3300`)
+5. **Workflow timeout**: 2-hour execution timeout prevents runaway loops
 
 ## Production Performance
 
@@ -128,18 +130,18 @@ The server-side deduplication architecture eliminates the need to download or st
 ### Key Components
 
 **`check_existing_file_metadata(repository, ioc_type, logger)`**:
-- Calls `ngsiem.list_lookup_files(filter=...)` for each known lookup file
+- Calls `ngsiem.list_lookup_files(filter=...)` for each known lookup file via `_call_with_retry`
 - Checks if the filename appears in the response's `resources` list
 - Returns `Set[str]` of filenames that exist in NGSIEM
 - HTTP 404 / missing from resources indicates the file doesn't exist (not an error)
-- Retry logic: 5 attempts with exponential backoff (5s, 10s, 20s, 40s, 60s)
+- Retries transient errors (429/500/503)
 
 **`upload_entries_to_ngsiem(csv_files, repository, existing_files, logger)`**:
 - Reads the new-rows-only CSV from `/tmp`
 - For existing files: calls `ngsiem.update_lookup_file_entries(update_mode="update", key_columns=<primary>, ignore_case="false")`
 - For new files: calls `ngsiem.update_lookup_file_entries(update_mode="append")`
 - Server handles matching on key column and replacing existing rows with updated versions
-- Retry logic: 5 attempts with exponential backoff for 429/503 transient errors
+- Retries transient errors (429/500/503)
 
 **`upload_csv_files_to_ngsiem(csv_files, repository, logger, existing_files)`**:
 - Router function that selects the upload strategy:
@@ -300,14 +302,11 @@ This prioritization ensures proper token advancement and prevents missing or dup
 - Falls back to exponential backoff with jitter: `5 * 2^attempt + random(0, 2)` seconds
 - Maximum 5 retries before failing
 
-**NGSIEM Upload Retries**:
-- Retries on HTTP 429 and 503 transient errors
-- Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped at 60s)
-- Maximum 5 retries per file
-
-**File Existence Check Retries**:
-- Same retry pattern as uploads (5 attempts, exponential backoff)
-- Aborts function if existence check fails to prevent data loss
+**NGSIEM Centralized Retry **:
+All NGSIEM API calls (metadata checks, uploads, collection writes) share a single retry helper:
+- Retryable status codes: HTTP 429, 500, and 503
+- Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped at `max_backoff=60`)
+- Maximum 5 attempts by default
 
 ## Benefits
 
@@ -332,6 +331,7 @@ This comprehensive solution provides:
 **Current Workflow Configuration**: The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) uses per-type null/`"0"` termination conditions with independent pagination loops:
 - **Condition expressions**: `WorkflowCustomVariable.next_{type}:!null+WorkflowCustomVariable.next_{type}:!'0'`
 - **Loop conditions**: Each type checks that its own `next_{type}` exists AND is not equal to "0"
+- **Loop guards**: `max_execution_seconds: 3300` (55 min) and `max_iteration_count: 200` per loop prevent runaway execution
 - **Variable updates** (per branch):
   - Initial: `Ingest{Type}.FaaS.anomali-ioc-ingest.AnomaliIngest.next`
   - Loop: `Ingest{Type}2.FaaS.anomali-ioc-ingest.AnomaliIngest.next`
@@ -347,6 +347,8 @@ skip_concurrent: true       # Prevent overlapping runs
 variables: next_ip, next_domain, next_url, next_email, next_hash
 branches: 5 parallel (IP, Domain, URL, Email, Hash)
 loops: per-type with sequential: true
+  max_execution_seconds: 3300   # 55 min hard cap per loop
+  max_iteration_count: 200      # Safety cap on iterations
 ```
 
 **Performance Projections**:

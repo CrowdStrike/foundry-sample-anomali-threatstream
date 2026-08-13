@@ -171,6 +171,62 @@ type IngestJob struct {
 	Parameters       map[string]interface{} `json:"parameters"`
 }
 
+// isRetryableError checks if an API error is transient and should be retried.
+// Retryable: 429 (rate limited), 500 (internal/proxy error), 503 (service unavailable).
+func isRetryableError(err error) bool {
+	if apiErr, ok := err.(*runtime.APIError); ok {
+		switch apiErr.Code {
+		case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable:
+			return true
+		}
+	}
+	return false
+}
+
+// callWithRetry executes an API call with retry logic for transient errors.
+// It retries on 429, 500, and 503 errors with exponential backoff.
+func callWithRetry[T any](ctx context.Context, logger *slog.Logger, description string, maxRetries int, fn func() (T, error)) (T, error) {
+	var zero T
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			backoffSeconds := 5 * (1 << uint(attempt-2))
+			if backoffSeconds > 60 {
+				backoffSeconds = 60
+			}
+			backoff := time.Duration(backoffSeconds) * time.Second
+			logger.Warn("Retrying after transient error",
+				"description", description,
+				"attempt", attempt,
+				"backoff_seconds", backoffSeconds)
+			select {
+			case <-ctx.Done():
+				return zero, fmt.Errorf("context cancelled during retry for %s: %w", description, ctx.Err())
+			case <-time.After(backoff):
+			}
+		}
+
+		result, err := fn()
+		if err == nil {
+			return result, nil
+		}
+
+		if !isRetryableError(err) {
+			return zero, err
+		}
+
+		logger.Warn("Retryable error",
+			"description", description,
+			"attempt", attempt,
+			"max_retries", maxRetries,
+			"error", err)
+
+		if attempt == maxRetries {
+			return zero, fmt.Errorf("%s failed after %d retries: %w", description, maxRetries, err)
+		}
+	}
+	return zero, fmt.Errorf("%s failed after %d retries", description, maxRetries)
+}
+
 func main() {
 	fdk.Run(context.Background(), newHandler)
 }
@@ -604,19 +660,16 @@ func saveUpdateID(ctx context.Context, falconClient *client.CrowdStrikeAPISpecif
 		return err
 	}
 
-	reader := io.NopCloser(bytes.NewReader(data))
-	params := custom_storage.NewPutObjectParamsWithContext(ctx)
-	params.Body = reader
-	params.CollectionName = CollectionUpdateTracker
-	params.ObjectKey = objectKey
-
-	resp, err := falconClient.CustomStorage.PutObject(params)
+	_, err = callWithRetry(ctx, logger, fmt.Sprintf("saving update_id for %s", iocType), 5, func() (*custom_storage.PutObjectOK, error) {
+		reader := io.NopCloser(bytes.NewReader(data))
+		params := custom_storage.NewPutObjectParamsWithContext(ctx)
+		params.Body = reader
+		params.CollectionName = CollectionUpdateTracker
+		params.ObjectKey = objectKey
+		return falconClient.CustomStorage.PutObject(params)
+	})
 	if err != nil {
 		return err
-	}
-
-	if resp == nil {
-		return fmt.Errorf("failed to save update_id: nil response")
 	}
 
 	logger.Info("Successfully saved update_id", "type", iocType)
@@ -906,74 +959,35 @@ func checkExistingFileMetadata(ctx context.Context, falconClient *client.CrowdSt
 
 	logger.Info("Checking existing lookup file metadata (no download)", "count", len(knownFilenames))
 
-	const maxRetries = 5
-
 	for _, filename := range knownFilenames {
-		var lastErr error
-		var checked bool
-		var fileNotFound bool
-
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			if attempt > 1 {
-				backoffSeconds := 5 * (1 << uint(attempt-2))
-				if backoffSeconds > 60 {
-					backoffSeconds = 60
-				}
-				backoff := time.Duration(backoffSeconds) * time.Second
-				logger.Info("Retrying metadata check after backoff",
-					"filename", filename,
-					"attempt", attempt,
-					"backoff_seconds", backoffSeconds)
-				time.Sleep(backoff)
-			}
-
+		resp, err := callWithRetry(ctx, logger, fmt.Sprintf("metadata check for %s", filename), 5, func() (*ngsiem.ListLookupFilesOK, error) {
 			filter := fmt.Sprintf("name:~'%s'", filename)
 			params := ngsiem.NewListLookupFilesParamsWithContext(ctx)
 			params.Filter = &filter
 			params.SearchDomain = &repository
-
-			resp, err := falconClient.Ngsiem.ListLookupFiles(params)
-			if err != nil {
-				lastErr = fmt.Errorf("ListLookupFiles failed: %w", err)
-				logger.Warn("Metadata check attempt failed",
-					"filename", filename,
-					"attempt", attempt,
-					"error", err)
-				continue
-			}
-
-			// Check if filename is in the response resources
-			found := false
-			for _, resource := range resp.Payload.Resources {
-				if resource == filename {
-					found = true
-					break
-				}
-			}
-
-			if !found {
-				logger.Info("File not found (will be created)", "filename", filename)
-				fileNotFound = true
-				break
-			}
-
-			// Success - file exists
-			existingFiles[filename] = true
-			logger.Info("File exists", "filename", filename)
-			checked = true
-			break
-		}
-
-		if fileNotFound {
-			continue
-		}
-
-		if !checked {
+			return falconClient.Ngsiem.ListLookupFiles(params)
+		})
+		if err != nil {
 			logger.Error("Failed to check file metadata after all retries",
 				"filename", filename,
-				"max_retries", maxRetries,
-				"error", lastErr)
-			return nil, fmt.Errorf("metadata check failed for %s after %d retries: %v", filename, maxRetries, lastErr)
+				"error", err)
+			return nil, fmt.Errorf("metadata check failed for %s: %v", filename, err)
+		}
+
+		// Check if filename is in the response resources
+		found := false
+		for _, resource := range resp.Payload.Resources {
+			if resource == filename {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			logger.Info("File not found (will be created)", "filename", filename)
+		} else {
+			existingFiles[filename] = true
+			logger.Info("File exists", "filename", filename)
 		}
 	}
 
@@ -1549,49 +1563,34 @@ func uploadCSVFilesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrik
 			continue
 		}
 
-		// New file: use UploadLookupV1 (full upload)
-		file, err := os.Open(csvFile)
-		if err != nil {
-			logger.Error("Failed to open file for upload", "filename", filename, "error", err)
-			results = append(results, map[string]interface{}{
-				"file":    filename,
-				"status":  "error",
-				"message": fmt.Sprintf("Failed to open file: %v", err),
-			})
-			continue
-		}
+		// New file: use UploadLookupV1 (full upload) with retry
+		response, err := callWithRetry(ctx, logger, fmt.Sprintf("uploading %s", filename), 5, func() (*ngsiem.UploadLookupV1OK, error) {
+			file, openErr := os.Open(csvFile)
+			if openErr != nil {
+				return nil, fmt.Errorf("failed to open file: %w", openErr)
+			}
 
-		// Get file size for logging
-		fileInfo, err := file.Stat()
-		if err != nil {
+			fileInfo, statErr := file.Stat()
+			if statErr != nil {
+				file.Close()
+				return nil, fmt.Errorf("failed to stat file: %w", statErr)
+			}
+
+			logger.Info("Uploading file to NGSIEM",
+				"filename", filename,
+				"repository", repository,
+				"size_bytes", fileInfo.Size(),
+				"size_mb", float64(fileInfo.Size())/(1024*1024))
+
+			namedF := &namedFile{File: file, name: filename}
+			resp, uploadErr := falconClient.Ngsiem.UploadLookupV1(&ngsiem.UploadLookupV1Params{
+				File:       namedF,
+				Repository: repository,
+				Context:    ctx,
+			})
 			file.Close()
-			logger.Error("Failed to stat file", "filename", filename, "error", err)
-			results = append(results, map[string]interface{}{
-				"file":    filename,
-				"status":  "error",
-				"message": fmt.Sprintf("Failed to stat file: %v", err),
-			})
-			continue
-		}
-
-		logger.Info("Uploading file to NGSIEM",
-			"filename", filename,
-			"repository", repository,
-			"size_bytes", fileInfo.Size(),
-			"size_mb", float64(fileInfo.Size())/(1024*1024))
-
-		// Create named file wrapper for the upload
-		namedF := &namedFile{File: file, name: filename}
-
-		// Upload using gofalcon NGSIEM client
-		response, err := falconClient.Ngsiem.UploadLookupV1(&ngsiem.UploadLookupV1Params{
-			File:       namedF,
-			Repository: repository,
-			Context:    ctx,
+			return resp, uploadErr
 		})
-
-		// Close the file after upload attempt
-		file.Close()
 
 		if err != nil {
 			logger.Error("Failed to upload file to NGSIEM", "filename", filename, "error", err)
@@ -1637,24 +1636,7 @@ func uploadEntriesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrike
 	updateMode := "update"
 	ignoreCase := "false"
 
-	const maxRetries = 5
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt > 1 {
-			backoffSeconds := 5 * (1 << uint(attempt-2))
-			if backoffSeconds > 60 {
-				backoffSeconds = 60
-			}
-			// Add jitter
-			jitter := rand.Intn(backoffSeconds/2 + 1)
-			backoff := time.Duration(backoffSeconds+jitter) * time.Second
-			logger.Info("Retrying UpdateLookupFileEntries after backoff",
-				"filename", filename,
-				"attempt", attempt,
-				"backoff_seconds", backoffSeconds+jitter)
-			time.Sleep(backoff)
-		}
-
+	response, err := callWithRetry(ctx, logger, fmt.Sprintf("uploading %s", filename), 5, func() (*ngsiem.UpdateLookupFileEntriesOK, error) {
 		file, err := os.Open(csvFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open file: %w", err)
@@ -1671,8 +1653,7 @@ func uploadEntriesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrike
 			"repository", repository,
 			"update_mode", updateMode,
 			"key_columns", keyColumn,
-			"size_bytes", fileInfo.Size(),
-			"attempt", attempt)
+			"size_bytes", fileInfo.Size())
 
 		namedF := &namedFile{File: file, name: filename}
 
@@ -1686,43 +1667,30 @@ func uploadEntriesToNGSIEM(ctx context.Context, falconClient *client.CrowdStrike
 			Context:      ctx,
 		}
 
-		response, err := falconClient.Ngsiem.UpdateLookupFileEntries(params)
+		resp, apiErr := falconClient.Ngsiem.UpdateLookupFileEntries(params)
 		file.Close()
-
-		if err != nil {
-			// Check if retryable (429 rate limit or 503 service unavailable)
-			if apiErr, ok := err.(*runtime.APIError); ok && (apiErr.Code == http.StatusTooManyRequests || apiErr.Code == http.StatusServiceUnavailable) {
-				logger.Warn("Retryable error from UpdateLookupFileEntries",
-					"filename", filename,
-					"attempt", attempt,
-					"error", err)
-				if attempt < maxRetries {
-					continue
-				}
-			}
-			return nil, fmt.Errorf("UpdateLookupFileEntries failed after %d attempts: %w", attempt, err)
-		}
-
-		logger.Info("Successfully updated lookup file entries",
-			"filename", filename,
-			"repository", repository,
-			"attempt", attempt)
-
-		result := map[string]interface{}{
-			"file":        filename,
-			"status":      "success",
-			"message":     "File entries updated successfully (server-side dedup)",
-			"update_mode": updateMode,
-		}
-
-		if response != nil && response.XCSTRACEID != "" {
-			result["trace_id"] = response.XCSTRACEID
-		}
-
-		return result, nil
+		return resp, apiErr
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, fmt.Errorf("UpdateLookupFileEntries failed for %s after %d attempts", filename, maxRetries)
+	logger.Info("Successfully updated lookup file entries",
+		"filename", filename,
+		"repository", repository)
+
+	result := map[string]interface{}{
+		"file":        filename,
+		"status":      "success",
+		"message":     "File entries updated successfully (server-side dedup)",
+		"update_mode": updateMode,
+	}
+
+	if response != nil && response.XCSTRACEID != "" {
+		result["trace_id"] = response.XCSTRACEID
+	}
+
+	return result, nil
 }
 
 // extractNextToken extracts the next pagination token from API response metadata
@@ -1840,19 +1808,16 @@ func saveUpdateIDWithClient(ctx context.Context, storage CustomStorageClient, up
 		return err
 	}
 
-	reader := io.NopCloser(bytes.NewReader(data))
-	params := custom_storage.NewPutObjectParamsWithContext(ctx)
-	params.Body = reader
-	params.CollectionName = CollectionUpdateTracker
-	params.ObjectKey = objectKey
-
-	resp, err := storage.PutObject(params)
+	_, err = callWithRetry(ctx, logger, fmt.Sprintf("saving update_id for %s", iocType), 5, func() (*custom_storage.PutObjectOK, error) {
+		reader := io.NopCloser(bytes.NewReader(data))
+		params := custom_storage.NewPutObjectParamsWithContext(ctx)
+		params.Body = reader
+		params.CollectionName = CollectionUpdateTracker
+		params.ObjectKey = objectKey
+		return storage.PutObject(params)
+	})
 	if err != nil {
 		return err
-	}
-
-	if resp == nil {
-		return fmt.Errorf("failed to save update_id: nil response")
 	}
 
 	logger.Info("Successfully saved update_id", "type", iocType)
