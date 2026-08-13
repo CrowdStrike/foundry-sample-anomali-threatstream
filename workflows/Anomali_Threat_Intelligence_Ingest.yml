@@ -1,5 +1,5 @@
-name: Anomali Threat Intelligence Ingest Parallel
-description: Anomali ThreatStream IOC ingestion - parallel per-type execution for optimized /tmp usage
+name: Anomali Threat Intelligence Ingest
+description: Anomali ThreatStream IOC ingestion - parallel per-type execution
 parameters: {}
 provision_on_install: true
 trigger:
