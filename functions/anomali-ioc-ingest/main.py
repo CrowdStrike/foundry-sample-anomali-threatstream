@@ -820,21 +820,21 @@ def upload_entries_to_ngsiem(
 
             # Call with retry for transient errors (429, 503, nginx 500)
             if filename in existing_files:
-                def _do_update():
+                def _do_update(_fn=filename, _fd=file_data, _kc=key_column):
                     return ngsiem.update_lookup_file_entries(
                         search_domain=repository,
-                        filename=filename,
-                        file=file_data,
+                        filename=_fn,
+                        file=_fd,
                         update_mode="update",
-                        key_columns=key_column,
+                        key_columns=_kc,
                         ignore_case="false"
                     )
             else:
-                def _do_update():
+                def _do_update(_fn=filename, _fd=file_data):
                     return ngsiem.update_lookup_file_entries(
                         search_domain=repository,
-                        filename=filename,
-                        file=file_data,
+                        filename=_fn,
+                        file=_fd,
                         update_mode="append"
                     )
 
