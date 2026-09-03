@@ -981,7 +981,8 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
 def build_query_params(next_token, status_filter, type_filter, limit, custom_storage, headers, logger,
                        job=None, request_body=None, trustedcircles=None, feed_id=None,
                        confidence_gt=None, confidence_gte=None, confidence_lt=None, confidence_lte=None,
-                       severity=None):
+                       severity=None, itype=None, tlp=None, value_contains=None,
+                       value_startswith=None, tags_name=None, search_filter=None, q=None):
     """Build query parameters for Anomali API call.
 
     Args:
@@ -1001,6 +1002,13 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
         confidence_lt: Filter by confidence score less than
         confidence_lte: Filter by confidence score less than or equal to
         severity: Filter by severity (assigned by Anomali machine-learning algorithms)
+        itype: Filter by indicator type (e.g., bot_ip, mal_domain, apt_email)
+        tlp: Traffic Light Protocol designation
+        value_contains: Filter by observable value containing specified text
+        value_startswith: Filter by observable value starting with specified text
+        tags_name: Filter by tag name
+        search_filter: ID of saved search filter to execute
+        q: Advanced search query using Anomali filter language
     """
     # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-branches,unused-argument,too-many-locals,too-many-statements
     if next_token:
@@ -1106,6 +1114,29 @@ def build_query_params(next_token, status_filter, type_filter, limit, custom_sto
     if severity is not None:
         logger.info(f"Filtering by severity: {severity}")
         query_params["meta.severity"] = severity
+
+    # Add new Anomali intelligence filters (works for both initial and pagination)
+    if itype is not None:
+        logger.info(f"Filtering by itype: {itype}")
+        query_params["itype"] = itype
+    if tlp is not None:
+        logger.info(f"Filtering by tlp: {tlp}")
+        query_params["tlp"] = tlp
+    if value_contains is not None:
+        logger.info(f"Filtering by value__contains: {value_contains}")
+        query_params["value__contains"] = value_contains
+    if value_startswith is not None:
+        logger.info(f"Filtering by value__startswith: {value_startswith}")
+        query_params["value__startswith"] = value_startswith
+    if tags_name is not None:
+        logger.info(f"Filtering by tags.name: {tags_name}")
+        query_params["tags.name"] = tags_name
+    if search_filter is not None:
+        logger.info(f"Filtering by search_filter: {search_filter}")
+        query_params["search_filter"] = search_filter
+    if q is not None:
+        logger.info(f"Filtering by q: {q}")
+        query_params["q"] = q
 
     return query_params
 
@@ -1288,6 +1319,15 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         # Parse severity filter
         severity = request.body.get("severity", None)
 
+        # Parse new Anomali intelligence filters
+        itype = request.body.get("itype", None)
+        tlp = request.body.get("tlp", None)
+        value_contains = request.body.get("value_contains", None)
+        value_startswith = request.body.get("value_startswith", None)
+        tags_name = request.body.get("tags_name", None)
+        search_filter = request.body.get("search_filter", None)
+        q = request.body.get("q", None)
+
         # Parse type filter - only support single type or no type
         type_filter = request.body.get("type", None)  # Single IOC type filter
         if type_filter and ',' in str(type_filter):
@@ -1361,7 +1401,9 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     request_body=request.body, trustedcircles=trustedcircles, feed_id=feed_id,
                     confidence_gt=confidence_gt, confidence_gte=confidence_gte,
                     confidence_lt=confidence_lt, confidence_lte=confidence_lte,
-                    severity=severity
+                    severity=severity, itype=itype, tlp=tlp, value_contains=value_contains,
+                    value_startswith=value_startswith, tags_name=tags_name,
+                    search_filter=search_filter, q=q
                 )
 
                 logger.info(f"Final query_params before API call: {query_params}")
