@@ -292,6 +292,13 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"confidence_gt", req.ConfidenceGt,
 		"severity", req.Severity,
 		"update_id_gt", req.UpdateIDGt,
+		"itype", req.IType,
+		"tlp", req.TLP,
+		"value_contains", req.ValueContains,
+		"value_startswith", req.ValueStartsWith,
+		"tags_name", req.TagsName,
+		"search_filter", req.SearchFilter,
+		"q", req.Q,
 	)
 
 	// Create temp directory early for file downloads and processing
