@@ -1777,6 +1777,203 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
         self.assertNotIn("severity", result)
 
+    def test_build_query_params_with_itype_filter(self):
+        """Test build_query_params with itype filtering parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            itype="bot_ip"
+        )
+
+        self.assertEqual(result["itype"], "bot_ip")
+
+    def test_build_query_params_with_tlp_filter(self):
+        """Test build_query_params with TLP filtering parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            tlp="amber"
+        )
+
+        self.assertEqual(result["tlp"], "amber")
+
+    def test_build_query_params_with_value_contains_filter(self):
+        """Test build_query_params with value__contains filtering parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            value_contains="malware"
+        )
+
+        self.assertEqual(result["value__contains"], "malware")
+
+    def test_build_query_params_with_value_startswith_filter(self):
+        """Test build_query_params with value__startswith filtering parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            value_startswith="192.168"
+        )
+
+        self.assertEqual(result["value__startswith"], "192.168")
+
+    def test_build_query_params_with_tags_name_filter(self):
+        """Test build_query_params with tags.name filtering parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            tags_name="apt"
+        )
+
+        self.assertEqual(result["tags.name"], "apt")
+
+    def test_build_query_params_with_search_filter(self):
+        """Test build_query_params with search_filter parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            search_filter=42
+        )
+
+        self.assertEqual(result["search_filter"], 42)
+
+    def test_build_query_params_with_advanced_query(self):
+        """Test build_query_params with q (advanced query) parameter."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            q="status=active AND confidence>=80"
+        )
+
+        self.assertEqual(result["q"], "status=active AND confidence>=80")
+
+    def test_build_query_params_all_new_filters(self):
+        """Test build_query_params with all new filter parameters together."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job,
+            itype="mal_domain", tlp="red", value_contains="evil",
+            value_startswith="10.", tags_name="ransomware",
+            search_filter=99, q="threat_type=malware"
+        )
+
+        self.assertEqual(result["itype"], "mal_domain")
+        self.assertEqual(result["tlp"], "red")
+        self.assertEqual(result["value__contains"], "evil")
+        self.assertEqual(result["value__startswith"], "10.")
+        self.assertEqual(result["tags.name"], "ransomware")
+        self.assertEqual(result["search_filter"], 99)
+        self.assertEqual(result["q"], "threat_type=malware")
+
+    def test_build_query_params_no_new_filters(self):
+        """Test build_query_params without new filter parameters (default behavior)."""
+        mock_api_client = MagicMock()
+        mock_headers = {}
+        mock_logger = MagicMock()
+
+        job = {
+            "id": "test-job",
+            "parameters": {
+                "search_after": "12345",
+                "status": "active"
+            }
+        }
+
+        result = main.build_query_params(
+            None, "active", None, 1000, mock_api_client, mock_headers, mock_logger, job
+        )
+
+        for key in ["itype", "tlp", "value__contains", "value__startswith", "tags.name", "search_filter", "q"]:
+            self.assertNotIn(key, result)
+
     def test_fetch_iocs_multi_status_rate_limit(self):
         """Test fetch_iocs_from_anomali with 207 multi-status containing 429 rate limit."""
         mock_api_integrations = MagicMock()

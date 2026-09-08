@@ -80,6 +80,40 @@
       "type": "boolean",
       "description": "Enable early file size estimation to fail fast if projected size exceeds 200 MB limit",
       "default": false
+    },
+    "itype": {
+      "type": "string",
+      "description": "Filter by indicator type (e.g., bot_ip, mal_domain, apt_email)"
+    },
+    "tlp": {
+      "type": "string",
+      "description": "Traffic Light Protocol designation",
+      "enum": ["red", "amber", "amber+strict", "green", "clear"]
+    },
+    "value_contains": {
+      "type": "string",
+      "description": "Filter by observable value containing specified text"
+    },
+    "value_startswith": {
+      "type": "string",
+      "description": "Filter by observable value starting with specified text"
+    },
+    "tags_name": {
+      "type": "string",
+      "description": "Filter by tag name"
+    },
+    "severity": {
+      "type": "string",
+      "description": "Filter by severity level",
+      "enum": ["low", "medium", "high", "very-high"]
+    },
+    "search_filter": {
+      "type": "integer",
+      "description": "ID of saved search filter to execute"
+    },
+    "q": {
+      "type": "string",
+      "description": "Advanced search query using Anomali filter language"
     }
   },
   "required": [],

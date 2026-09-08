@@ -185,6 +185,7 @@ The function supports multiple filtering parameters for both initial and paginat
 **Type Filters**:
 - `type`: Single IOC type (`ip`, `domain`, `url`, `email`, `hash`, `md5`, `sha1`, `sha256`)
 - Hash subtypes (`md5`, `sha1`, `sha256`) are mapped to `hash` for the Anomali API but produce separate lookup files
+- `itype`: Anomali indicator subtype for granular filtering (e.g., `bot_ip`, `mal_domain`, `apt_email`)
 
 **Feed Filters**:
 - `trustedcircles`: Comma-separated feed IDs (e.g., `"11631,12345"`)
@@ -194,10 +195,24 @@ The function supports multiple filtering parameters for both initial and paginat
 - `confidence_gt`, `confidence_gte`, `confidence_lt`, `confidence_lte`: Numeric confidence score bounds
 
 **Severity Filter**:
-- `severity`: Filter by Anomali machine-learning assigned severity (`meta.severity`)
+- `severity`: Filter by Anomali machine-learning assigned severity (`meta.severity`). Values: `low`, `medium`, `high`, `very-high`
 
 **Status Filter**:
 - `status`: IOC status filter (no default — retrieves all statuses unless specified)
+
+**TLP Filter**:
+- `tlp`: Traffic Light Protocol designation. Values: `red`, `amber`, `amber+strict`, `green`, `clear`
+
+**Value Filters**:
+- `value_contains`: Filter by observable value containing specified text (maps to Anomali `value__contains`)
+- `value_startswith`: Filter by observable value starting with specified text (maps to Anomali `value__startswith`)
+
+**Tag Filter**:
+- `tags_name`: Filter by tag name (maps to Anomali `tags.name`)
+
+**Search Filters**:
+- `search_filter`: ID of a saved search filter to execute
+- `q`: Advanced search query using Anomali filter language
 
 ## Parallel Processing Architecture
 
@@ -323,7 +338,7 @@ This comprehensive solution provides:
 - **Data consistency**: Atomic updates per IOC type with server-side key-based deduplication
 - **Better monitoring**: Comprehensive logging shows IOC type breakdowns and processing stats
 - **Workflow control**: Single-page processing with condition-based workflow pagination
-- **Flexible filtering**: Confidence, severity, feed, and trusted circles filters
+- **Flexible filtering**: Confidence, severity, TLP, itype, value, tag, feed, trusted circles, saved search, and advanced query filters
 - **Quality assurance**: Python and Go test suites ensure reliability across all scenarios
 
 ## Production Deployment Strategy

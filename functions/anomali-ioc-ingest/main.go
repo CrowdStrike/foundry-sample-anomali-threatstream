@@ -112,6 +112,13 @@ type IngestRequest struct {
 	Severity        string `json:"severity"`
 	Limit           int    `json:"limit"`
 	Next            string `json:"next"`
+	IType           string `json:"itype"`
+	TLP             string `json:"tlp"`
+	ValueContains   string `json:"value_contains"`
+	ValueStartsWith string `json:"value_startswith"`
+	TagsName        string `json:"tags_name"`
+	SearchFilter    *int   `json:"search_filter"`
+	Q               string `json:"q"`
 }
 
 // IngestResponse represents the response payload
@@ -285,6 +292,13 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		"confidence_gt", req.ConfidenceGt,
 		"severity", req.Severity,
 		"update_id_gt", req.UpdateIDGt,
+		"itype", req.IType,
+		"tlp", req.TLP,
+		"value_contains", req.ValueContains,
+		"value_startswith", req.ValueStartsWith,
+		"tags_name", req.TagsName,
+		"search_filter", req.SearchFilter,
+		"q", req.Q,
 	)
 
 	// Create temp directory early for file downloads and processing
@@ -2065,6 +2079,27 @@ func buildQueryParams(req IngestRequest, job *IngestJob, nextToken string) map[s
 	}
 	if req.Severity != "" {
 		queryParams["meta.severity"] = req.Severity
+	}
+	if req.IType != "" {
+		queryParams["itype"] = req.IType
+	}
+	if req.TLP != "" {
+		queryParams["tlp"] = req.TLP
+	}
+	if req.ValueContains != "" {
+		queryParams["value__contains"] = req.ValueContains
+	}
+	if req.ValueStartsWith != "" {
+		queryParams["value__startswith"] = req.ValueStartsWith
+	}
+	if req.TagsName != "" {
+		queryParams["tags.name"] = req.TagsName
+	}
+	if req.SearchFilter != nil {
+		queryParams["search_filter"] = *req.SearchFilter
+	}
+	if req.Q != "" {
+		queryParams["q"] = req.Q
 	}
 
 	return queryParams

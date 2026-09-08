@@ -2922,6 +2922,148 @@ func TestBuildQueryParamsHashTypeMapping(t *testing.T) {
 	}
 }
 
+// TestBuildQueryParamsWithIType tests itype filter parameter
+func TestBuildQueryParamsWithIType(t *testing.T) {
+	req := IngestRequest{
+		IType: "bot_ip",
+		Limit: 1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["itype"] != "bot_ip" {
+		t.Errorf("Expected itype='bot_ip', got '%v'", params["itype"])
+	}
+}
+
+// TestBuildQueryParamsWithTLP tests TLP filter parameter
+func TestBuildQueryParamsWithTLP(t *testing.T) {
+	req := IngestRequest{
+		TLP:   "amber",
+		Limit: 1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["tlp"] != "amber" {
+		t.Errorf("Expected tlp='amber', got '%v'", params["tlp"])
+	}
+}
+
+// TestBuildQueryParamsWithValueContains tests value__contains filter parameter
+func TestBuildQueryParamsWithValueContains(t *testing.T) {
+	req := IngestRequest{
+		ValueContains: "malware",
+		Limit:         1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["value__contains"] != "malware" {
+		t.Errorf("Expected value__contains='malware', got '%v'", params["value__contains"])
+	}
+}
+
+// TestBuildQueryParamsWithValueStartsWith tests value__startswith filter parameter
+func TestBuildQueryParamsWithValueStartsWith(t *testing.T) {
+	req := IngestRequest{
+		ValueStartsWith: "192.168",
+		Limit:           1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["value__startswith"] != "192.168" {
+		t.Errorf("Expected value__startswith='192.168', got '%v'", params["value__startswith"])
+	}
+}
+
+// TestBuildQueryParamsWithTagsName tests tags.name filter parameter
+func TestBuildQueryParamsWithTagsName(t *testing.T) {
+	req := IngestRequest{
+		TagsName: "apt",
+		Limit:    1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["tags.name"] != "apt" {
+		t.Errorf("Expected tags.name='apt', got '%v'", params["tags.name"])
+	}
+}
+
+// TestBuildQueryParamsWithSearchFilter tests search_filter parameter
+func TestBuildQueryParamsWithSearchFilter(t *testing.T) {
+	sf := 42
+	req := IngestRequest{
+		SearchFilter: &sf,
+		Limit:        1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["search_filter"] != 42 {
+		t.Errorf("Expected search_filter=42, got '%v'", params["search_filter"])
+	}
+}
+
+// TestBuildQueryParamsWithAdvancedQuery tests q (advanced query) parameter
+func TestBuildQueryParamsWithAdvancedQuery(t *testing.T) {
+	req := IngestRequest{
+		Q:     "status=active AND confidence>=80",
+		Limit: 1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["q"] != "status=active AND confidence>=80" {
+		t.Errorf("Expected q='status=active AND confidence>=80', got '%v'", params["q"])
+	}
+}
+
+// TestBuildQueryParamsAllNewFilters tests all new filter parameters together
+func TestBuildQueryParamsAllNewFilters(t *testing.T) {
+	sf := 99
+	req := IngestRequest{
+		IType:           "mal_domain",
+		TLP:             "red",
+		ValueContains:   "evil",
+		ValueStartsWith: "10.",
+		TagsName:        "ransomware",
+		SearchFilter:    &sf,
+		Q:               "threat_type=malware",
+		Limit:           1000,
+	}
+	params := buildQueryParams(req, nil, "")
+
+	if params["itype"] != "mal_domain" {
+		t.Errorf("Expected itype='mal_domain', got '%v'", params["itype"])
+	}
+	if params["tlp"] != "red" {
+		t.Errorf("Expected tlp='red', got '%v'", params["tlp"])
+	}
+	if params["value__contains"] != "evil" {
+		t.Errorf("Expected value__contains='evil', got '%v'", params["value__contains"])
+	}
+	if params["value__startswith"] != "10." {
+		t.Errorf("Expected value__startswith='10.', got '%v'", params["value__startswith"])
+	}
+	if params["tags.name"] != "ransomware" {
+		t.Errorf("Expected tags.name='ransomware', got '%v'", params["tags.name"])
+	}
+	if params["search_filter"] != 99 {
+		t.Errorf("Expected search_filter=99, got '%v'", params["search_filter"])
+	}
+	if params["q"] != "threat_type=malware" {
+		t.Errorf("Expected q='threat_type=malware', got '%v'", params["q"])
+	}
+}
+
+// TestBuildQueryParamsNoNewFilters tests absence of new filter parameters when not set
+func TestBuildQueryParamsNoNewFilters(t *testing.T) {
+	req := IngestRequest{Limit: 1000}
+	params := buildQueryParams(req, nil, "")
+
+	for _, key := range []string{"itype", "tlp", "value__contains", "value__startswith", "tags.name", "search_filter", "q"} {
+		if _, exists := params[key]; exists {
+			t.Errorf("%s should not be present when not specified", key)
+		}
+	}
+}
+
 // TestExtractNextTokenVariations tests various meta field formats for next token extraction
 func TestExtractNextTokenVariations(t *testing.T) {
 	logger := slog.Default()
