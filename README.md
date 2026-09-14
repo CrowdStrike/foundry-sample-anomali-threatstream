@@ -16,7 +16,7 @@ Automates threat intelligence ingestion from Anomali ThreatStream, synchronizing
 ## Prerequisites
 
 * The Foundry CLI (instructions below).
-* **For Python development**: Python 3.13+. See [Python For Beginners](https://www.python.org/about/gettingstarted/) for installation instructions.
+* **For Python development**: Python 3.14+. See [Python For Beginners](https://www.python.org/about/gettingstarted/) for installation instructions.
 * **For Go development**: Go 1.25+. See [Go Downloads](https://go.dev/dl/) for installation instructions.
 
 ### Install the Foundry CLI
