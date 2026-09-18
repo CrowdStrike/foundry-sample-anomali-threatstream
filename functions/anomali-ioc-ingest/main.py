@@ -1403,9 +1403,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         trustedcircles = request.body.get("trustedcircles", None)  # Feed ID filtering
         feed_id = request.body.get("feed_id", None)  # Feed ID filtering (alternative parameter)
         next_token = request.body.get("next", None)  # Workflow pagination continuation
-        limit = request.body.get("limit", 1000)  # Records per API call (Anomali max: 1000)
-        if limit > 1000:
-            limit = 1000
+        limit = min(request.body.get("limit", 1000), 1000)  # Records per API call (Anomali max: 1000)
 
         # Parse confidence filters
         confidence_gt = request.body.get("confidence_gt", None)
