@@ -67,7 +67,7 @@
     },
     "limit": {
       "type": "integer",
-      "description": "Number of records to fetch per API call (default: 1000, max: 1000)",
+      "description": "Number of records to fetch per API call (max: 1000 - Anomali API limit)",
       "minimum": 1,
       "maximum": 1000,
       "default": 1000
@@ -75,6 +75,20 @@
     "next": {
       "type": "string",
       "description": "Continuation token for workflow pagination"
+    },
+    "max_batch_size_mb": {
+      "type": "integer",
+      "description": "Max estimated CSV data (MB) to accumulate before stopping the multi-page fetch loop",
+      "minimum": 1,
+      "maximum": 150,
+      "default": 100
+    },
+    "max_fetch_time_seconds": {
+      "type": "integer",
+      "description": "Max seconds to spend fetching pages from Anomali before processing accumulated data",
+      "minimum": 30,
+      "maximum": 600,
+      "default": 300
     },
     "fail_fast_enabled": {
       "type": "boolean",
