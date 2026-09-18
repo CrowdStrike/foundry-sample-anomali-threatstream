@@ -1,6 +1,6 @@
 # Anomali NGSIEM Connector Sync Strategy
 
-The Anomali NGSIEM connector performs **incremental/delta sync** with **parallel per-type processing**, not full download and replace. The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) processes all 5 IOC types concurrently with independent pagination loops. It uses **server-side deduplication** in production — existing lookup files are never downloaded to `/tmp`; instead the function writes only new rows and uses the NGSIEM `update_lookup_file_entries()` API to merge and deduplicate server-side.
+The Anomali NGSIEM connector performs **incremental/delta sync** with **parallel per-type processing**, not full download and replace. The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) processes all 5 IOC types concurrently as independent actions. Each function invocation internally pages through multiple Anomali API calls, accumulating IOCs until a configurable size or time limit is reached. It uses **server-side deduplication** in production — existing lookup files are never downloaded to `/tmp`; instead the function writes only new rows and uses the NGSIEM `update_lookup_file_entries()` API to merge and deduplicate server-side.
 
 ## Architecture Overview
 
@@ -8,47 +8,56 @@ The Anomali NGSIEM connector performs **incremental/delta sync** with **parallel
 flowchart TD
     Start["<b>Workflow Start</b><br/>Triggered hourly or manually"]
 
-    Start --> CheckMeta["<b>Phase 1: Check File Metadata</b><br/>list_lookup_files() API<br/>No download to /tmp"]
+    Start --> Parallel["<b>Launch 5 Parallel Actions</b><br/>IP, Domain, URL, Email, Hash"]
+
+    Parallel --> CheckMeta["<b>Phase 1: Check File Metadata</b><br/>list_lookup_files() API<br/>No download to /tmp"]
 
     CheckMeta --> InitCheck["<b>Initial Call Check</b><br/>next_token present?"]
 
     InitCheck -->|No| CreateJob["<b>Create Job Record</b><br/>Generate UUID<br/>Type-specific ID"]
-    InitCheck -->|Yes| SkipJob["<b>Skip Job Creation</b><br/>Pagination call"]
+    InitCheck -->|Yes| SkipJob["<b>Skip Job Creation</b><br/>Resume from previous run"]
 
     CreateJob --> GetState["<b>Get Last Update ID</b><br/>Query: last_update_{type}<br/>65-min lookback buffer"]
-    SkipJob --> UseToken["<b>Use Workflow Token</b><br/>Direct: search_after=token"]
+    SkipJob --> UseToken["<b>Use Saved Token</b><br/>Direct: search_after=token"]
 
-    GetState --> Query["<b>Query Anomali API</b><br/>type={ioc_type}<br/>limit=1000"]
-    UseToken --> Query
+    GetState --> MultiPage
+    UseToken --> MultiPage
 
-    Query --> Parse["<b>Parse Response</b><br/>Extract IOCs<br/>Extract meta.next"]
+    subgraph MultiPage ["<b>Multi-Page Fetch Loop (fetchIOCsMultiPage)</b>"]
+        direction TB
+        Query["<b>Query Anomali API</b><br/>type={ioc_type}<br/>limit=1000 per API call"]
+        Parse["<b>Parse Response</b><br/>Extract IOCs<br/>Extract meta.next"]
+        Accumulate["<b>Accumulate IOCs</b><br/>Append to batch"]
+        StopCheck{"<b>Stop Condition?</b><br/>CSV size >= max_batch_size_mb<br/>Elapsed >= max_fetch_time_seconds<br/>No meta.next<br/>Zero IOCs returned"}
 
-    Parse --> HasData{"<b>IOCs Returned?</b>"}
+        Query --> Parse
+        Parse --> Accumulate
+        Accumulate --> StopCheck
+        StopCheck -->|"No (continue)"| Query
+    end
 
-    HasData -->|No| Return0["<b>Return (no next field)</b><br/>Terminate workflow"]
+    StopCheck -->|"Yes (stop)"| HasData{"<b>IOCs in batch?</b>"}
+
+    HasData -->|No| Return0["<b>Return (no next field)</b><br/>Nothing to process"]
 
     HasData -->|Yes| WriteNew["<b>Write New Rows to /tmp</b><br/>CSV with header + new IOCs only<br/>No existing data downloaded"]
 
     WriteNew --> Upload["<b>Server-Side Update</b><br/>update_lookup_file_entries()<br/>update_mode=update, key_columns=primary"]
 
-    Upload --> CheckNext{"<b>More Data?</b><br/>meta.next exists"}
+    Upload --> CheckRemaining{"<b>More data remaining?</b><br/>Stopped due to size/time limit"}
 
-    CheckNext -->|Yes| ExtractToken["<b>Extract Next Token</b><br/>Priority:<br/>1. search_after<br/>2. update_id__gt<br/>3. from_update_id<br/>4. fallback to last IOC"]
+    CheckRemaining -->|Yes| ReturnNext["<b>Return next: token</b><br/>Remaining data picked up<br/>on next scheduled run"]
 
-    CheckNext -->|No| SaveState["<b>Save Update ID</b><br/>Store highest update_id<br/>to last_update_{type}"]
+    CheckRemaining -->|No| SaveState["<b>Save Update ID</b><br/>Store highest update_id<br/>to last_update_{type}"]
 
-    ExtractToken --> ReturnNext["<b>Return next: token</b><br/>Workflow continues"]
-
-    SaveState --> Return0Final["<b>Return (no next field)</b><br/>Workflow terminates"]
-
-    ReturnNext --> WorkflowLoop["<b>Workflow Loop</b><br/>Check: next != null"]
-
-    WorkflowLoop --> Start
+    SaveState --> Return0Final["<b>Return (no next field)</b><br/>All data ingested"]
 
     Return0 --> End["<b>Workflow Complete</b>"]
     Return0Final --> End
+    ReturnNext --> End
 
     style Start fill:#e1f5ff,stroke:#0277bd,stroke-width:3px,color:#000,font-size:14px
+    style Parallel fill:#e1f5ff,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
     style End fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px,color:#000,font-size:14px
     style CreateJob fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
     style SkipJob fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
@@ -56,23 +65,24 @@ flowchart TD
     style UseToken fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000,font-size:13px
     style Query fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
     style Parse fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
+    style Accumulate fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
     style CheckMeta fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000,font-size:13px
     style WriteNew fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000,font-size:13px
     style Upload fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000,font-size:13px
-    style ExtractToken fill:#ffccbc,stroke:#d84315,stroke-width:2px,color:#000,font-size:13px
     style SaveState fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000,font-size:13px
     style HasData fill:#fff59d,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
-    style CheckNext fill:#fff59d,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
+    style StopCheck fill:#fff59d,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
+    style CheckRemaining fill:#fff59d,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
     style Return0 fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#000,font-size:13px
     style Return0Final fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#000,font-size:13px
     style ReturnNext fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000,font-size:13px
-    style WorkflowLoop fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
     style InitCheck fill:#fff59d,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
+    style MultiPage fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000,font-size:13px
 ```
 
 ## How It Works
 
-The diagram above illustrates the complete pagination flow for a single IOC type. Here's how the components work together:
+The diagram above illustrates the complete flow for a single IOC type. Each function invocation internally pages through multiple Anomali API calls via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`, accumulating IOCs into a batch before uploading. Here's how the components work together:
 
 ### Phase 1: File Existence Check (Always First)
 1. **Metadata Check**: Calls `ngsiem.list_lookup_files(filter=...)` to determine which lookup files already exist — no file content is downloaded
@@ -83,12 +93,12 @@ The diagram above illustrates the complete pagination flow for a single IOC type
 1. **Job Creation**: Creates a unique job record with type-specific ID (e.g., `{uuid}_ip`)
 2. **State Retrieval**: Fetches last saved `update_id` from collections (e.g., `last_update_ip`)
 3. **Lookback Buffer**: Applies 65-minute buffer to ensure no IOCs are missed between runs
-4. **API Query**: Requests IOCs with `search_after={saved_value}&type=ip&limit=1000` (cursor omitted on cold start)
+4. **Multi-Page Fetch**: Calls `fetchIOCsMultiPage` / `fetch_iocs_multi_page` which loops over Anomali API pages (each limited to 1000 IOCs per API call), accumulating IOCs until a stop condition is met
 
-### Pagination Calls (next_token present)
+### Continuation Calls (next_token present from a previous run)
 1. **Job Skipping**: No new job created, reuses initial job ID for tracking
-2. **Direct Token Use**: Uses workflow's `next_token` directly as `search_after` parameter
-3. **API Query**: Requests next page with `search_after={next_token}&type=ip&limit=1000`
+2. **Direct Token Use**: Uses the saved `next_token` directly as the starting `search_after` parameter
+3. **Multi-Page Fetch**: Resumes multi-page accumulation from where the previous run left off
 
 ### Data Processing (Server-Side Deduplication)
 
@@ -103,16 +113,16 @@ For **new files** (no existing file in NGSIEM), uses `update_lookup_file_entries
 In **test mode** (`TEST_MODE=true`), files are written to a local `test_output/` directory instead of being uploaded to NGSIEM.
 
 ### Pagination Decision
-1. **Check meta.next**: If present, more data available
+1. **Internal Loop**: The multi-page fetch loop checks `meta.next` after each API call to determine if more pages are available
 2. **Extract Token**: Parses `meta.next` URL for pagination parameter (priority: `search_after` > `update_id__gt` > `from_update_id`)
-3. **Return Token**: Returns `next: {token}` to workflow, which loops back for next page
+3. **Stop or Continue**: If a stop condition is reached mid-ingestion, the function returns a `next` token so remaining data is picked up on the next scheduled run (hourly)
 
 ### Termination Conditions
-1. **No IOCs**: API returns empty result set → Omit `next` field from response (null terminates workflow)
-2. **No meta.next**: API indicates no more data → Save state, omit `next` field from response
-3. **Loop iteration cap**: Each loop limited to 200 iterations (`max_iteration_count: 200`)
-4. **Loop time cap**: Each loop limited to 55 minutes (`max_execution_seconds: 3300`)
-5. **Workflow timeout**: 2-hour execution timeout prevents runaway loops
+The multi-page fetch loop inside the function stops when any of these conditions is met:
+1. **Size limit reached**: Estimated CSV size >= `max_batch_size_mb` (default 100 MB, max 150 MB)
+2. **Time limit reached**: Elapsed time >= `max_fetch_time_seconds` (default 300 seconds, max 600 seconds)
+3. **No more data**: API response has no `meta.next` token
+4. **Zero IOCs returned**: API returns an empty result set
 
 ## Production Performance
 
@@ -168,7 +178,7 @@ The `upload_csv_files_to_ngsiem()` router selects the upload path based on envir
 ## Workflow Termination & Missing File Recovery
 
 ### Workflow Termination
-The function omits the `"next"` field from the response body when pagination should stop. The workflow checks both that `next` exists (is not null) AND is not equal to "0" before continuing to the next iteration.
+The function omits the `"next"` field from the response body when all available data has been ingested. If the function hits its size or time limit mid-ingestion, it returns a `next` token so remaining data is picked up on the next scheduled run.
 
 ### Missing File Recovery
 When a lookup file is deleted, the system detects this via the `list_lookup_files()` check and triggers recovery:
@@ -216,25 +226,23 @@ The function supports multiple filtering parameters for both initial and paginat
 
 ## Parallel Processing Architecture
 
-**The workflow (`Anomali_Threat_Intelligence_Ingest.yml`)** processes all 5 IOC types concurrently with independent pagination loops.
+**The workflow (`Anomali_Threat_Intelligence_Ingest.yml`)** processes all 5 IOC types concurrently as independent single actions triggered in parallel from the schedule.
 
-**Workflow Execution**: The workflow creates per-type variables and launches 5 parallel branches simultaneously:
-- IP addresses (`type=ip`) → variable `next_ip`
-- Domains (`type=domain`) → variable `next_domain`
-- URLs (`type=url`) → variable `next_url`
-- Email addresses (`type=email`) → variable `next_email`
-- File hashes (`type=hash`) → variable `next_hash`
+**Workflow Execution**: The workflow launches 5 parallel actions simultaneously — one per IOC type:
+- IP addresses (`type=ip`)
+- Domains (`type=domain`)
+- URLs (`type=url`)
+- Email addresses (`type=email`)
+- File hashes (`type=hash`)
 
-**Per-Type Pagination Loops**: Each branch has its own loop with independent termination:
-- **Condition**: `WorkflowCustomVariable.next_{type}:!null+WorkflowCustomVariable.next_{type}:!'0'`
-- **Variable update**: `${data['Ingest{Type}.FaaS.anomali-ioc-ingest.AnomaliIngest.next']}`
-- **Loop variable**: `${data['WorkflowCustomVariable.next_{type}']}`
+**Internal Multi-Page Pagination**: Each function invocation handles its own pagination internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`. The function loops over multiple Anomali API pages (each limited to 1000 IOCs), accumulating IOCs until a size limit, time limit, or end-of-data condition is reached. There are no workflow-level loops, variables, or `CreateVariable`/`UpdateVariable` actions.
 
 **Benefits**:
 - **Faster processing**: All 5 types process simultaneously
 - **Minimal /tmp usage**: Only new rows written to disk per type (no existing file download)
-- **Independent pagination**: Each type paginating independently prevents one slow type from blocking others
+- **Independent pagination**: Each type paginates independently within its own function invocation, preventing one slow type from blocking others
 - **Independent failure isolation**: A failure in one type does not affect the others
+- **Simplified workflow**: No loop constructs, variables, or condition expressions — each type is a single action
 
 **Race Condition Prevention**: Each parallel action maintains independent state tracking to prevent conflicts.
 
@@ -256,16 +264,17 @@ The function supports multiple filtering parameters for both initial and paginat
 
 **Delta Query Parameters**:
 - **Initial calls**: Create job records and use saved `update_id` state from collections with 65-minute lookback buffer
-- **Pagination calls**: Use workflow-provided `next_token` directly as `search_after` parameter for continuation
+- **Pagination calls**: Use saved `next_token` directly as `search_after` parameter for continuation
 - **Clean separation**: Initial and pagination calls follow separate, non-overlapping code paths to prevent parameter conflicts
 - Includes a 65-minute lookback buffer to ensure no data is missed between hourly workflow runs
 
-**Workflow Pagination Architecture**:
-- **Workflow-managed looping**: Workflow handles all pagination iteration logic with condition-based termination (loops until `next` is null or "0")
-- **Function role**: Function processes single pages and returns `next` token when more data is available
-- **Initial calls**: Create jobs, use saved state, return data + next token for workflow to store
-- **Pagination calls**: Skip job creation, use workflow's `next_token` directly in API query
-- **Termination handling**: Function omits `"next"` field when no more data; workflow condition checks for null and "0"
+**Internal Multi-Page Pagination Architecture**:
+- **Function-managed looping**: The function handles all pagination internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`, looping over multiple Anomali API pages per invocation
+- **Accumulation**: Each API call returns up to 1000 IOCs; the function accumulates IOCs across pages until a stop condition is met
+- **Stop conditions**: Estimated CSV size >= `max_batch_size_mb`, elapsed time >= `max_fetch_time_seconds`, no `meta.next` token, or zero IOCs returned
+- **Initial calls**: Create jobs, use saved state, fetch multiple pages, return data + optional `next` token if interrupted by size/time limit
+- **Continuation calls**: Skip job creation, resume multi-page fetch from saved `next_token`
+- **Remaining data**: If the function hits its size or time limit mid-ingestion, it returns a `next` token; remaining data is picked up on the next scheduled run (hourly), not via workflow loop
 - **Cursor advancement**: Even when no supported IOC types produce CSV files, the cursor is advanced to avoid re-fetching the same page
 
 **Token Progression**: Parses the API's `meta.next` URL to extract the pagination cursor with the following priority order:
@@ -333,23 +342,21 @@ This comprehensive solution provides:
 - **Minimal disk usage**: Only new rows written to `/tmp` — no existing file download
 - **Memory efficiency**: No streaming buffers or full file downloads needed
 - **Server-side dedup**: NGSIEM handles merge/replace logic via `update_lookup_file_entries()`
-- **Configurable performance**: Adjustable page sizes (1-1000 records per call)
+- **Configurable performance**: Adjustable multi-page fetch parameters (`max_batch_size_mb` up to 150 MB, `max_fetch_time_seconds` up to 600 seconds)
 - **Race condition safety**: Independent state tracking per type
 - **Data consistency**: Atomic updates per IOC type with server-side key-based deduplication
 - **Better monitoring**: Comprehensive logging shows IOC type breakdowns and processing stats
-- **Workflow control**: Single-page processing with condition-based workflow pagination
+- **Workflow control**: Internal multi-page pagination with size and time limits per function invocation
 - **Flexible filtering**: Confidence, severity, TLP, itype, value, tag, feed, trusted circles, saved search, and advanced query filters
 - **Quality assurance**: Python and Go test suites ensure reliability across all scenarios
 
 ## Production Deployment Strategy
 
-**Current Workflow Configuration**: The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) uses per-type null/`"0"` termination conditions with independent pagination loops:
-- **Condition expressions**: `WorkflowCustomVariable.next_{type}:!null+WorkflowCustomVariable.next_{type}:!'0'`
-- **Loop conditions**: Each type checks that its own `next_{type}` exists AND is not equal to "0"
-- **Loop guards**: `max_execution_seconds: 3300` (55 min) and `max_iteration_count: 200` per loop prevent runaway execution
-- **Variable updates** (per branch):
-  - Initial: `Ingest{Type}.FaaS.anomali-ioc-ingest.AnomaliIngest.next`
-  - Loop: `Ingest{Type}2.FaaS.anomali-ioc-ingest.AnomaliIngest.next`
+**Current Workflow Configuration**: The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) launches 5 parallel actions (one per IOC type) with no loops, variables, or iteration constructs:
+- **No workflow loops**: The `loops:` section, `CreateVariable`, and all `UpdateVariable*` actions have been removed
+- **Function-level pagination**: Each function invocation handles multi-page fetching internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`
+- **Size/time limits**: `max_batch_size_mb` (default 100, max 150) and `max_fetch_time_seconds` (default 300, max 600) control how much data is processed per invocation
+- **Cross-run continuation**: If the function hits its size/time limit, it returns a `next` token; remaining data is picked up on the next scheduled run
 - **Schedule**: Hourly execution (`0 0/1 * * *`) with concurrent runs disabled
 - **Timeout**: 2 hours (7200 seconds) maximum execution time
 
@@ -359,11 +366,9 @@ name: Anomali Threat Intelligence Ingest
 provision_on_install: true
 schedule: "0 0/1 * * *"    # Hourly execution
 skip_concurrent: true       # Prevent overlapping runs
-variables: next_ip, next_domain, next_url, next_email, next_hash
-branches: 5 parallel (IP, Domain, URL, Email, Hash)
-loops: per-type with sequential: true
-  max_execution_seconds: 3300   # 55 min hard cap per loop
-  max_iteration_count: 200      # Safety cap on iterations
+branches: 5 parallel actions (IP, Domain, URL, Email, Hash)
+# No variables, no loops — each action is a single function invocation
+# that handles multi-page pagination internally
 ```
 
 **Performance Projections**:
@@ -379,5 +384,5 @@ loops: per-type with sequential: true
 - File size growth validation (alert if < 50% expected)
 - Processing time tracking (alert if > 2 minutes per call)
 - Success rate monitoring (alert if > 5% failure rate)
-- Workflow termination validation (alert if approaching 2-hour timeout)
+- Workflow termination validation (alert if approaching 2-hour workflow timeout)
 - Missing file alerts (alert if files not recreated within 2 runs)
