@@ -392,20 +392,34 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             {"status_code": 200},          # update_job (mark as completed)
         ]
 
-        # Return IOCs with unsupported types BUT meta has a valid "next" URL
-        mock_api_integrations.execute_command_proxy.return_value = {
-            "status_code": 200,
-            "body": {
-                "objects": [
-                    {"id": 1, "itype": "unknown_type", "value": "val1", "update_id": "100"},
-                    {"id": 2, "itype": "another_unknown", "value": "val2", "update_id": "101"}
-                ],
-                "meta": {
-                    "total_count": 1000,
-                    "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+        # Return IOCs with unsupported types BUT meta has a valid "next" URL.
+        # Use side_effect so the multi-page fetcher sees data on page 1 and
+        # an empty page 2 (no next), stopping the loop after one real page.
+        mock_api_integrations.execute_command_proxy.side_effect = [
+            {
+                "status_code": 200,
+                "body": {
+                    "objects": [
+                        {"id": 1, "itype": "unknown_type", "value": "val1", "update_id": "100"},
+                        {"id": 2, "itype": "another_unknown", "value": "val2", "update_id": "101"}
+                    ],
+                    "meta": {
+                        "total_count": 1000,
+                        "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+                    }
                 }
-            }
-        }
+            },
+            {
+                "status_code": 200,
+                "body": {
+                    "objects": [],
+                    "meta": {
+                        "total_count": 1000,
+                        "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+                    }
+                }
+            },
+        ]
 
         request = Request()
         request.body = {"repository": "search-all"}
