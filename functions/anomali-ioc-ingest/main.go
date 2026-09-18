@@ -97,27 +97,27 @@ var iocTypeMappings = map[string]IOCTypeMapping{
 
 // IngestRequest represents the request payload for IOC ingestion
 type IngestRequest struct {
-	Repository      string `json:"repository"`
-	Status          string `json:"status"`
-	Type            string `json:"type"`
-	TrustedCircles  string `json:"trustedcircles"`
-	FeedID          string `json:"feed_id"`
-	ModifiedTsGt    string `json:"modified_ts_gt"`
-	ModifiedTsLt    string `json:"modified_ts_lt"`
-	UpdateIDGt      string `json:"update_id_gt"`
-	ConfidenceGt    *int   `json:"confidence_gt"`
-	ConfidenceGte   *int   `json:"confidence_gte"`
-	ConfidenceLt    *int   `json:"confidence_lt"`
-	ConfidenceLte   *int   `json:"confidence_lte"`
-	Severity        string `json:"severity"`
-	Limit           int    `json:"limit"`
-	Next            string `json:"next"`
-	IType           string `json:"itype"`
-	TLP             string `json:"tlp"`
-	ValueContains   string `json:"value_contains"`
-	ValueStartsWith string `json:"value_startswith"`
-	TagsName        string `json:"tags_name"`
-	SearchFilter    *int   `json:"search_filter"`
+	Repository          string `json:"repository"`
+	Status              string `json:"status"`
+	Type                string `json:"type"`
+	TrustedCircles      string `json:"trustedcircles"`
+	FeedID              string `json:"feed_id"`
+	ModifiedTsGt        string `json:"modified_ts_gt"`
+	ModifiedTsLt        string `json:"modified_ts_lt"`
+	UpdateIDGt          string `json:"update_id_gt"`
+	ConfidenceGt        *int   `json:"confidence_gt"`
+	ConfidenceGte       *int   `json:"confidence_gte"`
+	ConfidenceLt        *int   `json:"confidence_lt"`
+	ConfidenceLte       *int   `json:"confidence_lte"`
+	Severity            string `json:"severity"`
+	Limit               int    `json:"limit"`
+	Next                string `json:"next"`
+	IType               string `json:"itype"`
+	TLP                 string `json:"tlp"`
+	ValueContains       string `json:"value_contains"`
+	ValueStartsWith     string `json:"value_startswith"`
+	TagsName            string `json:"tags_name"`
+	SearchFilter        *int   `json:"search_filter"`
 	Q                   string `json:"q"`
 	MaxBatchSizeMB      int    `json:"max_batch_size_mb"`
 	MaxFetchTimeSeconds int    `json:"max_fetch_time_seconds"`
@@ -255,7 +255,6 @@ func isTestMode() bool {
 	testMode := strings.ToLower(os.Getenv("TEST_MODE"))
 	return testMode == "true" || testMode == "1" || testMode == "yes"
 }
-
 
 func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *slog.Logger) fdk.Response {
 	req := r.Body
