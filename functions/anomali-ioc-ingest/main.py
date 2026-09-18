@@ -393,6 +393,101 @@ def format_elapsed_time(elapsed_seconds: float) -> str:
     return f"{elapsed_seconds:.1f}s"
 
 
+def fetch_iocs_multi_page(
+        api_integrations: APIIntegrations,
+        base_params: Dict[str, Any],
+        max_batch_bytes: int,
+        max_fetch_time: int,
+        logger: Logger,
+) -> tuple[List[Dict], Dict]:
+    """Fetch multiple pages of IOCs from Anomali, accumulating results.
+
+    Loops internally over Anomali pages until the estimated CSV size reaches
+    max_batch_bytes or max_fetch_time seconds have elapsed.
+
+    Args:
+        api_integrations: API integration client.
+        base_params: Initial query parameters (including search_after if paginating).
+        max_batch_bytes: Max estimated CSV bytes before stopping.
+        max_fetch_time: Max seconds to spend fetching pages.
+        logger: Logger instance.
+
+    Returns:
+        Tuple of (all accumulated IOCs, last page's meta dict).
+    """
+    all_iocs: List[Dict] = []
+    estimated_bytes = 0
+    last_meta: Dict = {}
+    fetch_start = time.time()
+    current_params = base_params.copy()
+    page = 0
+
+    logger.info(
+        f"Multi-page fetch: starting (max_size={max_batch_bytes // (1024 * 1024)}MB, "
+        f"max_time={max_fetch_time}s)"
+    )
+
+    while True:
+        page += 1
+
+        try:
+            page_iocs, page_meta = fetch_iocs_from_anomali(api_integrations, current_params, logger)
+        except Exception as e:
+            # If we already accumulated some IOCs, return what we have
+            if all_iocs:
+                logger.warning(
+                    f"Multi-page fetch: error on page {page}, returning accumulated IOCs: {e}"
+                )
+                return all_iocs, last_meta
+            raise
+
+        all_iocs.extend(page_iocs)
+        estimated_bytes += len(page_iocs) * 150
+        last_meta = page_meta
+        elapsed = time.time() - fetch_start
+
+        logger.info(
+            f"Multi-page fetch: page {page} fetched {len(page_iocs)} IOCs "
+            f"(total={len(all_iocs)}, est_size={estimated_bytes / (1024 * 1024):.1f}MB, "
+            f"elapsed={elapsed:.1f}s)"
+        )
+
+        # Extract next token from this page's meta
+        page_next_token = extract_next_token_from_meta(page_meta, page_iocs, logger)
+
+        # Check stop conditions
+        if not page_next_token:
+            logger.info(
+                f"Multi-page fetch: stopped after {page} pages (no more data), "
+                f"total IOCs={len(all_iocs)}, est_size={estimated_bytes / (1024 * 1024):.1f}MB"
+            )
+            break
+        if len(page_iocs) == 0:
+            logger.info(
+                f"Multi-page fetch: stopped after {page} pages (zero IOCs returned), "
+                f"total IOCs={len(all_iocs)}, est_size={estimated_bytes / (1024 * 1024):.1f}MB"
+            )
+            break
+        if estimated_bytes >= max_batch_bytes:
+            logger.info(
+                f"Multi-page fetch: stopped after {page} pages (size limit reached), "
+                f"total IOCs={len(all_iocs)}, est_size={estimated_bytes / (1024 * 1024):.1f}MB"
+            )
+            break
+        if elapsed >= max_fetch_time:
+            logger.info(
+                f"Multi-page fetch: stopped after {page} pages (time limit reached), "
+                f"total IOCs={len(all_iocs)}, elapsed={elapsed:.1f}s"
+            )
+            break
+
+        # Update search_after for the next page
+        current_params = current_params.copy()
+        current_params["search_after"] = page_next_token
+
+    return all_iocs, last_meta
+
+
 def fetch_iocs_from_anomali(
         api_integrations: APIIntegrations,
         params: Dict[str, Any],
@@ -1294,7 +1389,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
     - trustedcircles: Comma-separated feed IDs for filtering (e.g., "11631,12345")
     - feed_id: Comma-separated feed IDs for filtering (alternative to trustedcircles)
     - update_id_gt: Update ID greater than (for manual overrides)
-    - limit: Number of records to fetch per call (default: 1000, max: 1000)
+    - limit: Number of records to fetch per API call (default: 1000, max: 1000 - Anomali API limit)
     - next: Continuation token for workflow pagination
     """
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals
@@ -1308,7 +1403,9 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         trustedcircles = request.body.get("trustedcircles", None)  # Feed ID filtering
         feed_id = request.body.get("feed_id", None)  # Feed ID filtering (alternative parameter)
         next_token = request.body.get("next", None)  # Workflow pagination continuation
-        limit = request.body.get("limit", 1000)  # Number of records per API call
+        limit = request.body.get("limit", 1000)  # Records per API call (Anomali max: 1000)
+        if limit > 1000:
+            limit = 1000
 
         # Parse confidence filters
         confidence_gt = request.body.get("confidence_gt", None)
@@ -1327,6 +1424,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         tags_name = request.body.get("tags_name", None)
         search_filter = request.body.get("search_filter", None)
         q = request.body.get("q", None)
+
+        # Parse multi-page fetch parameters
+        max_batch_size_mb = request.body.get("max_batch_size_mb", 100)
+        max_batch_size_mb = max(1, min(150, max_batch_size_mb))
+        max_fetch_time_seconds = request.body.get("max_fetch_time_seconds", 300)
+        max_fetch_time_seconds = max(30, min(600, max_fetch_time_seconds))
 
         # Parse type filter - only support single type or no type
         type_filter = request.body.get("type", None)  # Single IOC type filter
@@ -1408,10 +1511,13 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
                 logger.info(f"Final query_params before API call: {query_params}")
 
-                # Phase 2: Fetch IOCs from Anomali
+                # Phase 2: Fetch IOCs from Anomali (multi-page)
                 phase2_start = time.time()
                 logger.info("Phase 2: Fetching IOCs from Anomali...")
-                iocs, meta = fetch_iocs_from_anomali(api_integrations, query_params, logger)
+                max_batch_bytes = max_batch_size_mb * 1024 * 1024
+                iocs, meta = fetch_iocs_multi_page(
+                    api_integrations, query_params, max_batch_bytes, max_fetch_time_seconds, logger
+                )
 
                 phase2_elapsed = time.time() - phase2_start
                 logger.info(f"Phase 2 complete: Fetched {len(iocs)} IOCs in {format_elapsed_time(phase2_elapsed)}")
