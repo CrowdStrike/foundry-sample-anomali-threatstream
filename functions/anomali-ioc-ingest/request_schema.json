@@ -80,8 +80,8 @@
       "type": "integer",
       "description": "Max estimated CSV data (MB) to accumulate before stopping the multi-page fetch loop",
       "minimum": 1,
-      "maximum": 150,
-      "default": 100
+      "maximum": 50,
+      "default": 20
     },
     "max_fetch_time_seconds": {
       "type": "integer",

@@ -119,7 +119,7 @@ In **test mode** (`TEST_MODE=true`), files are written to a local `test_output/`
 
 ### Termination Conditions
 The multi-page fetch loop inside the function stops when any of these conditions is met:
-1. **Size limit reached**: Estimated CSV size >= `max_batch_size_mb` (default 100 MB, max 150 MB)
+1. **Size limit reached**: Estimated CSV size >= `max_batch_size_mb` (default 20 MB, max 50 MB)
 2. **Time limit reached**: Elapsed time >= `max_fetch_time_seconds` (default 300 seconds, max 600 seconds)
 3. **No more data**: API response has no `meta.next` token
 4. **Zero IOCs returned**: API returns an empty result set
@@ -271,7 +271,7 @@ The function supports multiple filtering parameters for both initial and paginat
 **Internal Multi-Page Pagination Architecture**:
 - **Function-managed looping**: The function handles all pagination internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`, looping over multiple Anomali API pages per invocation
 - **Accumulation**: Each API call returns up to 1000 IOCs; the function accumulates IOCs across pages until a stop condition is met
-- **Stop conditions**: Estimated CSV size >= `max_batch_size_mb`, elapsed time >= `max_fetch_time_seconds`, no `meta.next` token, or zero IOCs returned
+- **Stop conditions**: Estimated size >= `max_batch_size_mb`, elapsed time >= `max_fetch_time_seconds`, no `meta.next` token, or zero IOCs returned
 - **Initial calls**: Create jobs, use saved state, fetch multiple pages, return data + optional `next` token if interrupted by size/time limit
 - **Continuation calls**: Skip job creation, resume multi-page fetch from saved `next_token`
 - **Remaining data**: If the function hits its size or time limit mid-ingestion, it returns a `next` token; remaining data is picked up on the next scheduled run (hourly), not via workflow loop
@@ -342,7 +342,7 @@ This comprehensive solution provides:
 - **Minimal disk usage**: Only new rows written to `/tmp` — no existing file download
 - **Memory efficiency**: No streaming buffers or full file downloads needed
 - **Server-side dedup**: NGSIEM handles merge/replace logic via `update_lookup_file_entries()`
-- **Configurable performance**: Adjustable multi-page fetch parameters (`max_batch_size_mb` up to 150 MB, `max_fetch_time_seconds` up to 600 seconds)
+- **Configurable performance**: Adjustable multi-page fetch parameters (`max_batch_size_mb` up to 50 MB, `max_fetch_time_seconds` up to 600 seconds)
 - **Race condition safety**: Independent state tracking per type
 - **Data consistency**: Atomic updates per IOC type with server-side key-based deduplication
 - **Better monitoring**: Comprehensive logging shows IOC type breakdowns and processing stats
@@ -355,7 +355,7 @@ This comprehensive solution provides:
 **Current Workflow Configuration**: The workflow (`Anomali_Threat_Intelligence_Ingest.yml`, `provision_on_install: true`) launches 5 parallel actions (one per IOC type) with no loops, variables, or iteration constructs:
 - **No workflow loops**: The `loops:` section, `CreateVariable`, and all `UpdateVariable*` actions have been removed
 - **Function-level pagination**: Each function invocation handles multi-page fetching internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`
-- **Size/time limits**: `max_batch_size_mb` (default 100, max 150) and `max_fetch_time_seconds` (default 300, max 600) control how much data is processed per invocation
+- **Size/time limits**: `max_batch_size_mb` (default 20, max 50) and `max_fetch_time_seconds` (default 300, max 600) control how much data is processed per invocation
 - **Cross-run continuation**: If the function hits its size/time limit, it returns a `next` token; remaining data is picked up on the next scheduled run
 - **Schedule**: Hourly execution (`0 0/1 * * *`) with concurrent runs disabled
 - **Timeout**: 2 hours (7200 seconds) maximum execution time

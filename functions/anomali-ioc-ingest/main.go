@@ -274,10 +274,10 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 
 	maxBatchSizeMB := req.MaxBatchSizeMB
 	if maxBatchSizeMB <= 0 {
-		maxBatchSizeMB = 100
+		maxBatchSizeMB = 20
 	}
-	if maxBatchSizeMB > 150 {
-		maxBatchSizeMB = 150
+	if maxBatchSizeMB > 50 {
+		maxBatchSizeMB = 50
 	}
 
 	maxFetchTime := req.MaxFetchTimeSeconds
@@ -1070,7 +1070,7 @@ func fetchIOCsMultiPage(
 		}
 
 		allIOCs = append(allIOCs, pageIOCs...)
-		estimatedBytes += int64(len(pageIOCs)) * 150
+		estimatedBytes += int64(len(pageIOCs)) * 300
 		lastMeta = pageMeta
 		elapsed := time.Since(fetchStart)
 

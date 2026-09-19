@@ -3597,23 +3597,23 @@ func TestMaxBatchSizeMBClamping(t *testing.T) {
 		input    int
 		expected int
 	}{
-		{"zero defaults to 100", 0, 100},
-		{"negative defaults to 100", -5, 100},
+		{"zero defaults to 20", 0, 20},
+		{"negative defaults to 20", -5, 20},
 		{"within range unchanged", 50, 50},
 		{"at lower bound", 1, 1},
-		{"at upper bound", 150, 150},
-		{"above upper bound clamped to 150", 200, 150},
-		{"way above upper bound clamped to 150", 999, 150},
+		{"at upper bound", 50, 50},
+		{"above upper bound clamped to 50", 200, 50},
+		{"way above upper bound clamped to 50", 999, 50},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			maxBatchSizeMB := tt.input
 			if maxBatchSizeMB <= 0 {
-				maxBatchSizeMB = 100
+				maxBatchSizeMB = 20
 			}
-			if maxBatchSizeMB > 150 {
-				maxBatchSizeMB = 150
+			if maxBatchSizeMB > 50 {
+				maxBatchSizeMB = 50
 			}
 			if maxBatchSizeMB != tt.expected {
 				t.Errorf("maxBatchSizeMB clamping(%d) = %d, expected %d", tt.input, maxBatchSizeMB, tt.expected)
@@ -3682,22 +3682,22 @@ func TestMultiPageStopConditionEmptyIOCs(t *testing.T) {
 }
 
 func TestMultiPageSizeEstimation(t *testing.T) {
-	// Test that the size estimation logic (150 bytes per IOC) works correctly
+	// Test that the size estimation logic (300 bytes per IOC) works correctly
 	tests := []struct {
 		name           string
 		iocCount       int64
 		maxBatchBytes  int64
 		shouldExceed   bool
 	}{
-		{"under limit", 100, 1024 * 1024, false},          // 100 * 150 = 15KB < 1MB
-		{"at limit", 6991, 1024 * 1024, true},              // 6991 * 150 = 1048650 >= 1MB
-		{"over limit", 10000, 1024 * 1024, true},            // 10000 * 150 = ~1.4MB > 1MB
-		{"large batch", 700000, 100 * 1024 * 1024, true},   // 700K * 150 = ~100MB >= 100MB
+		{"under limit", 100, 1024 * 1024, false},          // 100 * 300 = 30KB < 1MB
+		{"at limit", 3496, 1024 * 1024, true},              // 3496 * 300 = 1048800 >= 1MB
+		{"over limit", 10000, 1024 * 1024, true},            // 10000 * 300 = ~2.9MB > 1MB
+		{"large batch", 350000, 100 * 1024 * 1024, true},   // 350K * 300 = ~100MB >= 100MB
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			estimatedBytes := tt.iocCount * 150
+			estimatedBytes := tt.iocCount * 300
 			exceeded := estimatedBytes >= tt.maxBatchBytes
 			if exceeded != tt.shouldExceed {
 				t.Errorf("Size estimation for %d IOCs: estimated=%d, maxBatch=%d, exceeded=%v, expected=%v",
