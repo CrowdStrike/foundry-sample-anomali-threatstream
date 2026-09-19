@@ -60,6 +60,17 @@ from falconpy import APIIntegrations, NGSIEM, CustomStorage
 
 FUNC = Function.instance()
 
+# Fields used by process_iocs_to_csv and cursor tracking
+_IOC_KEEP_FIELDS = frozenset({
+    "itype", "ip", "value", "confidence", "threat_type",
+    "meta", "source", "tags", "expiration_ts", "update_id", "id",
+})
+
+
+def _slim_ioc(ioc):
+    """Strip an IOC dict to only the fields needed downstream."""
+    return {k: ioc[k] for k in _IOC_KEEP_FIELDS if k in ioc}
+
 
 class AnomaliFunctionError(Exception):
     """Base exception for Anomali function errors."""
@@ -441,8 +452,8 @@ def fetch_iocs_multi_page(
                 return all_iocs, last_meta
             raise
 
-        all_iocs.extend(page_iocs)
-        estimated_bytes += len(page_iocs) * 150
+        all_iocs.extend(_slim_ioc(ioc) for ioc in page_iocs)
+        estimated_bytes += len(page_iocs) * 300
         last_meta = page_meta
         elapsed = time.time() - fetch_start
 
@@ -1424,8 +1435,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         q = request.body.get("q", None)
 
         # Parse multi-page fetch parameters
-        max_batch_size_mb = request.body.get("max_batch_size_mb", 100)
-        max_batch_size_mb = max(1, min(150, max_batch_size_mb))
+        max_batch_size_mb = request.body.get("max_batch_size_mb", 20)
+        max_batch_size_mb = max(1, min(50, max_batch_size_mb))
         max_fetch_time_seconds = request.body.get("max_fetch_time_seconds", 300)
         max_fetch_time_seconds = max(30, min(600, max_fetch_time_seconds))
 

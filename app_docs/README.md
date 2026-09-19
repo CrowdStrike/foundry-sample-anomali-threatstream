@@ -35,7 +35,7 @@ Provides automated threat intelligence ingestion from Anomali ThreatStream APIs 
 - `feed_id`: Comma-separated Anomali feed IDs to filter ingestion (e.g., "0368,1390")
 - `type`: IOC type filter for selective ingestion (options: "ip", "domain", "url", "email", "hash", "md5", "sha1", "sha256")
 - `limit`: Number of records per API call (default: 1000, max: 1000)
-- `max_batch_size_mb`: Max estimated CSV data (MB) to accumulate per invocation before processing (default: 100, range: 1-150)
+- `max_batch_size_mb`: Max estimated CSV data (MB) to accumulate per invocation before processing (default: 20, range: 1-50)
 - `max_fetch_time_seconds`: Max seconds to spend fetching pages from Anomali before processing (default: 300, range: 30-600)
 - `confidence_gt`: Filter IOCs with confidence score greater than specified value (0-100)
 - `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100)
