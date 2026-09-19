@@ -2553,9 +2553,9 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         """Test multi-page fetch stops when estimated size exceeds max_batch_bytes."""
         mock_logger = MagicMock()
 
-        # Each page returns 1000 IOCs; at 150 bytes/IOC, that's 150KB per page.
-        # With max_batch_bytes = 200KB, it should stop after page 1 (150KB >= threshold not met)
-        # and fetch page 2 (300KB >= 200KB → stop).
+        # Each page returns 1000 IOCs; at 300 bytes/IOC, that's ~293KB per page.
+        # With max_batch_bytes = 400KB, it should stop after page 1 (293KB < threshold)
+        # and fetch page 2 (586KB >= 400KB → stop).
         big_page = [{"id": i, "itype": "ip", "ip": f"1.1.1.{i}"} for i in range(1000)]
 
         mock_fetch.side_effect = [
@@ -2565,8 +2565,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         ]
         mock_extract.side_effect = ["100", "200", None]
 
-        # 200KB limit: 1000 IOCs * 150 = 150KB (page 1), 2000 * 150 = 300KB (page 2 triggers stop)
-        max_batch_bytes = 200 * 1024  # 200KB
+        # 400KB limit: 1000 IOCs * 300 = 293KB (page 1), 2000 * 300 = 586KB (page 2 triggers stop)
+        max_batch_bytes = 400 * 1024  # 400KB
 
         iocs, meta = main.fetch_iocs_multi_page(
             MagicMock(), {"limit": 1000}, max_batch_bytes, 300, mock_logger
