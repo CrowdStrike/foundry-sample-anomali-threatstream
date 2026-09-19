@@ -97,28 +97,30 @@ var iocTypeMappings = map[string]IOCTypeMapping{
 
 // IngestRequest represents the request payload for IOC ingestion
 type IngestRequest struct {
-	Repository      string `json:"repository"`
-	Status          string `json:"status"`
-	Type            string `json:"type"`
-	TrustedCircles  string `json:"trustedcircles"`
-	FeedID          string `json:"feed_id"`
-	ModifiedTsGt    string `json:"modified_ts_gt"`
-	ModifiedTsLt    string `json:"modified_ts_lt"`
-	UpdateIDGt      string `json:"update_id_gt"`
-	ConfidenceGt    *int   `json:"confidence_gt"`
-	ConfidenceGte   *int   `json:"confidence_gte"`
-	ConfidenceLt    *int   `json:"confidence_lt"`
-	ConfidenceLte   *int   `json:"confidence_lte"`
-	Severity        string `json:"severity"`
-	Limit           int    `json:"limit"`
-	Next            string `json:"next"`
-	IType           string `json:"itype"`
-	TLP             string `json:"tlp"`
-	ValueContains   string `json:"value_contains"`
-	ValueStartsWith string `json:"value_startswith"`
-	TagsName        string `json:"tags_name"`
-	SearchFilter    *int   `json:"search_filter"`
-	Q               string `json:"q"`
+	Repository          string `json:"repository"`
+	Status              string `json:"status"`
+	Type                string `json:"type"`
+	TrustedCircles      string `json:"trustedcircles"`
+	FeedID              string `json:"feed_id"`
+	ModifiedTsGt        string `json:"modified_ts_gt"`
+	ModifiedTsLt        string `json:"modified_ts_lt"`
+	UpdateIDGt          string `json:"update_id_gt"`
+	ConfidenceGt        *int   `json:"confidence_gt"`
+	ConfidenceGte       *int   `json:"confidence_gte"`
+	ConfidenceLt        *int   `json:"confidence_lt"`
+	ConfidenceLte       *int   `json:"confidence_lte"`
+	Severity            string `json:"severity"`
+	Limit               int    `json:"limit"`
+	Next                string `json:"next"`
+	IType               string `json:"itype"`
+	TLP                 string `json:"tlp"`
+	ValueContains       string `json:"value_contains"`
+	ValueStartsWith     string `json:"value_startswith"`
+	TagsName            string `json:"tags_name"`
+	SearchFilter        *int   `json:"search_filter"`
+	Q                   string `json:"q"`
+	MaxBatchSizeMB      int    `json:"max_batch_size_mb"`
+	MaxFetchTimeSeconds int    `json:"max_fetch_time_seconds"`
 }
 
 // IngestResponse represents the response payload
@@ -254,7 +256,6 @@ func isTestMode() bool {
 	return testMode == "true" || testMode == "1" || testMode == "yes"
 }
 
-
 func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *slog.Logger) fdk.Response {
 	req := r.Body
 	startTime := time.Now()
@@ -269,6 +270,22 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	limit := req.Limit
 	if limit <= 0 || limit > 1000 {
 		limit = 1000
+	}
+
+	maxBatchSizeMB := req.MaxBatchSizeMB
+	if maxBatchSizeMB <= 0 {
+		maxBatchSizeMB = 20
+	}
+	if maxBatchSizeMB > 50 {
+		maxBatchSizeMB = 50
+	}
+
+	maxFetchTime := req.MaxFetchTimeSeconds
+	if maxFetchTime <= 0 {
+		maxFetchTime = 300
+	}
+	if maxFetchTime > 600 {
+		maxFetchTime = 600
 	}
 
 	// Validate type filter
@@ -383,10 +400,12 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 		}
 	}
 
-	// Fetch IOCs from Anomali via API integration
+	// Fetch IOCs from Anomali via API integration (multi-page)
 	fetchStartTime := time.Now()
 	logger.Info("Phase 2: Fetching IOCs from Anomali API")
-	iocs, meta, err := fetchIOCsFromAnomali(ctx, falconClient, r, job, logger)
+	maxBatchBytes := int64(maxBatchSizeMB) * 1024 * 1024
+	maxFetchDuration := time.Duration(maxFetchTime) * time.Second
+	iocs, meta, err := fetchIOCsMultiPage(ctx, falconClient, r, job, maxBatchBytes, maxFetchDuration, logger)
 	fetchDuration := time.Since(fetchStartTime)
 	if err != nil {
 		logger.Error("Failed to fetch IOCs from Anomali",
@@ -1006,6 +1025,104 @@ func checkExistingFileMetadata(ctx context.Context, falconClient *client.CrowdSt
 	}
 
 	return existingFiles, nil
+}
+
+// fetchIOCsMultiPage fetches multiple pages of IOCs from Anomali, accumulating results
+// until the estimated CSV size reaches maxBatchBytes or maxFetchTime elapses.
+func fetchIOCsMultiPage(
+	ctx context.Context,
+	falconClient *client.CrowdStrikeAPISpecification,
+	r fdk.RequestOf[IngestRequest],
+	job *IngestJob,
+	maxBatchBytes int64,
+	maxFetchTime time.Duration,
+	logger *slog.Logger,
+) ([]IOC, map[string]interface{}, error) {
+	var allIOCs []IOC
+	var estimatedBytes int64
+	var lastMeta map[string]interface{}
+	fetchStart := time.Now()
+	nextToken := r.Body.Next
+	page := 0
+
+	logger.Info("Multi-page fetch: starting",
+		"max_size_mb", maxBatchBytes/(1024*1024),
+		"max_time_s", maxFetchTime.Seconds())
+
+	for {
+		page++
+
+		// Build a modified request with the current nextToken for this page
+		pageRequest := r
+		pageRequest.Body.Next = nextToken
+
+		pageIOCs, pageMeta, err := fetchIOCsFromAnomali(ctx, falconClient, pageRequest, job, logger)
+		if err != nil {
+			// If we already accumulated some IOCs, return what we have with the last good meta
+			if len(allIOCs) > 0 {
+				logger.Warn("Multi-page fetch: error on page, returning accumulated IOCs",
+					"page", page,
+					"error", err,
+					"total_iocs", len(allIOCs))
+				return allIOCs, lastMeta, nil
+			}
+			return nil, nil, err
+		}
+
+		allIOCs = append(allIOCs, pageIOCs...)
+		estimatedBytes += int64(len(pageIOCs)) * 300
+		lastMeta = pageMeta
+		elapsed := time.Since(fetchStart)
+
+		logger.Info("Multi-page fetch: page fetched",
+			"page", page,
+			"page_iocs", len(pageIOCs),
+			"total_iocs", len(allIOCs),
+			"est_size_mb", fmt.Sprintf("%.1f", float64(estimatedBytes)/(1024*1024)),
+			"elapsed_s", fmt.Sprintf("%.1f", elapsed.Seconds()))
+
+		// Extract next token from this page's meta
+		pageNextToken := extractNextToken(pageMeta, pageIOCs, logger)
+
+		// Check stop conditions
+		if pageNextToken == "" {
+			logger.Info("Multi-page fetch: stopped",
+				"pages", page,
+				"reason", "no more data",
+				"total_iocs", len(allIOCs),
+				"est_size_mb", fmt.Sprintf("%.1f", float64(estimatedBytes)/(1024*1024)))
+			break
+		}
+		if len(pageIOCs) == 0 {
+			logger.Info("Multi-page fetch: stopped",
+				"pages", page,
+				"reason", "zero IOCs returned",
+				"total_iocs", len(allIOCs),
+				"est_size_mb", fmt.Sprintf("%.1f", float64(estimatedBytes)/(1024*1024)))
+			break
+		}
+		if estimatedBytes >= maxBatchBytes {
+			logger.Info("Multi-page fetch: stopped",
+				"pages", page,
+				"reason", "size limit reached",
+				"total_iocs", len(allIOCs),
+				"est_size_mb", fmt.Sprintf("%.1f", float64(estimatedBytes)/(1024*1024)))
+			break
+		}
+		if elapsed >= maxFetchTime {
+			logger.Info("Multi-page fetch: stopped",
+				"pages", page,
+				"reason", "time limit reached",
+				"total_iocs", len(allIOCs),
+				"elapsed_s", fmt.Sprintf("%.1f", elapsed.Seconds()))
+			break
+		}
+
+		// Continue with next page
+		nextToken = pageNextToken
+	}
+
+	return allIOCs, lastMeta, nil
 }
 
 // fetchIOCsFromAnomali fetches IOCs from the Anomali ThreatStream API via API Integration
