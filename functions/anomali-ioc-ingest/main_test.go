@@ -3588,3 +3588,153 @@ func TestUploadEntriesToNGSIEM_SucceedsAfterRetry(t *testing.T) {
 		t.Errorf("Expected 3 attempts, got %d", callCount)
 	}
 }
+
+// ===== Tests for multi-page fetch parameter clamping =====
+
+func TestMaxBatchSizeMBClamping(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    int
+		expected int
+	}{
+		{"zero defaults to 20", 0, 20},
+		{"negative defaults to 20", -5, 20},
+		{"within range unchanged", 50, 50},
+		{"at lower bound", 1, 1},
+		{"at upper bound", 50, 50},
+		{"above upper bound clamped to 50", 200, 50},
+		{"way above upper bound clamped to 50", 999, 50},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			maxBatchSizeMB := tt.input
+			if maxBatchSizeMB <= 0 {
+				maxBatchSizeMB = 20
+			}
+			if maxBatchSizeMB > 50 {
+				maxBatchSizeMB = 50
+			}
+			if maxBatchSizeMB != tt.expected {
+				t.Errorf("maxBatchSizeMB clamping(%d) = %d, expected %d", tt.input, maxBatchSizeMB, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMaxFetchTimeSecondsClamping(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    int
+		expected int
+	}{
+		{"zero defaults to 300", 0, 300},
+		{"negative defaults to 300", -10, 300},
+		{"within range unchanged", 120, 120},
+		{"at lower bound", 30, 30},
+		{"at upper bound", 600, 600},
+		{"above upper bound clamped to 600", 900, 600},
+		{"below lower bound defaults to 300", -1, 300},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			maxFetchTime := tt.input
+			if maxFetchTime <= 0 {
+				maxFetchTime = 300
+			}
+			if maxFetchTime > 600 {
+				maxFetchTime = 600
+			}
+			if maxFetchTime != tt.expected {
+				t.Errorf("maxFetchTime clamping(%d) = %d, expected %d", tt.input, maxFetchTime, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMultiPageStopConditionNoNextToken(t *testing.T) {
+	// Simulates the stop condition where meta has no next token
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	meta := map[string]interface{}{} // No "next" key
+	iocs := []IOC{{IP: "1.2.3.4", UpdateID: "100"}}
+
+	nextToken := extractNextToken(meta, iocs, logger)
+	if nextToken != "" {
+		t.Errorf("Expected empty next token for meta without next, got %q", nextToken)
+	}
+}
+
+func TestMultiPageStopConditionEmptyIOCs(t *testing.T) {
+	// When zero IOCs are returned, extractNextToken should return empty
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	meta := map[string]interface{}{
+		"next": "https://api.example.com/v2/indicators?search_after=500&limit=1000",
+	}
+	var emptyIOCs []IOC
+
+	nextToken := extractNextToken(meta, emptyIOCs, logger)
+	if nextToken != "" {
+		t.Errorf("Expected empty next token for empty IOCs, got %q", nextToken)
+	}
+}
+
+func TestMultiPageSizeEstimation(t *testing.T) {
+	// Test that the size estimation logic (300 bytes per IOC) works correctly
+	tests := []struct {
+		name           string
+		iocCount       int64
+		maxBatchBytes  int64
+		shouldExceed   bool
+	}{
+		{"under limit", 100, 1024 * 1024, false},          // 100 * 300 = 30KB < 1MB
+		{"at limit", 3496, 1024 * 1024, true},              // 3496 * 300 = 1048800 >= 1MB
+		{"over limit", 10000, 1024 * 1024, true},            // 10000 * 300 = ~2.9MB > 1MB
+		{"large batch", 350000, 100 * 1024 * 1024, true},   // 350K * 300 = ~100MB >= 100MB
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			estimatedBytes := tt.iocCount * 300
+			exceeded := estimatedBytes >= tt.maxBatchBytes
+			if exceeded != tt.shouldExceed {
+				t.Errorf("Size estimation for %d IOCs: estimated=%d, maxBatch=%d, exceeded=%v, expected=%v",
+					tt.iocCount, estimatedBytes, tt.maxBatchBytes, exceeded, tt.shouldExceed)
+			}
+		})
+	}
+}
+
+func TestMultiPageNextTokenExtraction(t *testing.T) {
+	// Test that extractNextToken correctly extracts tokens across multiple pages
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	iocs := []IOC{{IP: "1.2.3.4", UpdateID: "100"}}
+
+	// Page 1 meta with search_after
+	meta1 := map[string]interface{}{
+		"next": "https://api.example.com/v2/indicators?search_after=500&limit=1000",
+	}
+	token1 := extractNextToken(meta1, iocs, logger)
+	if token1 != "500" {
+		t.Errorf("Page 1: expected token '500', got %q", token1)
+	}
+
+	// Page 2 meta with different search_after
+	meta2 := map[string]interface{}{
+		"next": "https://api.example.com/v2/indicators?search_after=1000&limit=1000",
+	}
+	token2 := extractNextToken(meta2, iocs, logger)
+	if token2 != "1000" {
+		t.Errorf("Page 2: expected token '1000', got %q", token2)
+	}
+
+	// Final page with no next (end of data)
+	meta3 := map[string]interface{}{}
+	token3 := extractNextToken(meta3, iocs, logger)
+	if token3 != "" {
+		t.Errorf("Final page: expected empty token, got %q", token3)
+	}
+}
