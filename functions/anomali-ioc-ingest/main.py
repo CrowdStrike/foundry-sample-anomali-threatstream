@@ -1349,12 +1349,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         )
 
         # Initialize clients
-        api_integrations = APIIntegrations()
-        # Use CustomStorage service class for collections — ext_headers bakes in
-        # X-CS-APP-ID for local development; in production Foundry sets it automatically
+        # ext_headers bakes in X-CS-APP-ID for local development; in production
+        # Foundry sets it automatically
         headers = {}
         if os.environ.get("APP_ID"):
             headers = {"X-CS-APP-ID": os.environ.get("APP_ID")}
+        api_integrations = APIIntegrations(ext_headers=headers)
         custom_storage = CustomStorage(ext_headers=headers)
 
         # Create temp_dir for CSV file creation during processing
