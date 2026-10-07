@@ -1,6 +1,6 @@
 module anomali-ioc-ingest
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/CrowdStrike/foundry-fn-go v0.24.1
