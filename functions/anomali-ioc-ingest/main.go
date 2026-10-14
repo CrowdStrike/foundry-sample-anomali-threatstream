@@ -48,6 +48,11 @@ const (
 	JobRunning              = "running"
 	JobCompleted            = "completed"
 	JobFailed               = "failed"
+
+	// FunctionTimeout is the hard deadline for the entire function invocation.
+	// Foundry functions have a 15-minute limit; we use 14 minutes to leave
+	// headroom for runtime overhead and graceful shutdown.
+	FunctionTimeout = 14 * time.Minute
 )
 
 // CustomStorageClient interface for custom storage operations (enables mocking)
@@ -260,6 +265,12 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	req := r.Body
 	startTime := time.Now()
 
+	// Apply a hard deadline so that retry/backoff loops cannot exceed the
+	// Foundry function time limit. All downstream ctx.Done() checks
+	// (in callWithRetry, fetchIOCsFromAnomali, etc.) will fire at this deadline.
+	ctx, cancel := context.WithDeadline(ctx, startTime.Add(FunctionTimeout))
+	defer cancel()
+
 	// Set defaults
 	repository := req.Repository
 	if repository == "" {
@@ -267,26 +278,13 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	}
 	repository = strings.TrimSpace(repository)
 
+	if req.Limit <= 0 || req.Limit > 1000 {
+		req.Limit = 1000
+	}
 	limit := req.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 1000
-	}
 
-	maxBatchSizeMB := req.MaxBatchSizeMB
-	if maxBatchSizeMB <= 0 {
-		maxBatchSizeMB = 20
-	}
-	if maxBatchSizeMB > 50 {
-		maxBatchSizeMB = 50
-	}
-
-	maxFetchTime := req.MaxFetchTimeSeconds
-	if maxFetchTime <= 0 {
-		maxFetchTime = 300
-	}
-	if maxFetchTime > 600 {
-		maxFetchTime = 600
-	}
+	maxBatchSizeMB := clampBatchSizeMB(req.MaxBatchSizeMB)
+	maxFetchTime := clampFetchTimeSeconds(req.MaxFetchTimeSeconds)
 
 	// Validate type filter
 	if req.Type != "" && strings.Contains(req.Type, ",") {
@@ -405,7 +403,7 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	logger.Info("Phase 2: Fetching IOCs from Anomali API")
 	maxBatchBytes := int64(maxBatchSizeMB) * 1024 * 1024
 	maxFetchDuration := time.Duration(maxFetchTime) * time.Second
-	iocs, meta, err := fetchIOCsMultiPage(ctx, falconClient, r, job, maxBatchBytes, maxFetchDuration, logger)
+	iocs, meta, err := fetchIOCsMultiPage(ctx, falconClient, r, job, maxBatchBytes, maxFetchDuration, fetchIOCsFromAnomali, logger)
 	fetchDuration := time.Since(fetchStartTime)
 	if err != nil {
 		logger.Error("Failed to fetch IOCs from Anomali",
@@ -1027,6 +1025,33 @@ func checkExistingFileMetadata(ctx context.Context, falconClient *client.CrowdSt
 	return existingFiles, nil
 }
 
+// clampBatchSizeMB clamps the batch size (in MB) to the range [1, 50].
+func clampBatchSizeMB(v int) int {
+	if v < 1 {
+		v = 1
+	}
+	if v > 50 {
+		v = 50
+	}
+	return v
+}
+
+// clampFetchTimeSeconds clamps the fetch time (in seconds) to the range [30, 600].
+func clampFetchTimeSeconds(v int) int {
+	if v < 30 {
+		v = 30
+	}
+	if v > 600 {
+		v = 600
+	}
+	return v
+}
+
+// fetchPageFunc is the signature for a function that fetches one page of IOCs.
+// Production code passes fetchIOCsFromAnomali; tests inject a mock.
+type fetchPageFunc func(ctx context.Context, falconClient *client.CrowdStrikeAPISpecification,
+	r fdk.RequestOf[IngestRequest], job *IngestJob, logger *slog.Logger) ([]IOC, map[string]interface{}, error)
+
 // fetchIOCsMultiPage fetches multiple pages of IOCs from Anomali, accumulating results
 // until the estimated CSV size reaches maxBatchBytes or maxFetchTime elapses.
 func fetchIOCsMultiPage(
@@ -1036,6 +1061,7 @@ func fetchIOCsMultiPage(
 	job *IngestJob,
 	maxBatchBytes int64,
 	maxFetchTime time.Duration,
+	fetchPage fetchPageFunc,
 	logger *slog.Logger,
 ) ([]IOC, map[string]interface{}, error) {
 	var allIOCs []IOC
@@ -1056,7 +1082,7 @@ func fetchIOCsMultiPage(
 		pageRequest := r
 		pageRequest.Body.Next = nextToken
 
-		pageIOCs, pageMeta, err := fetchIOCsFromAnomali(ctx, falconClient, pageRequest, job, logger)
+		pageIOCs, pageMeta, err := fetchPage(ctx, falconClient, pageRequest, job, logger)
 		if err != nil {
 			// If we already accumulated some IOCs, return what we have with the last good meta
 			if len(allIOCs) > 0 {
@@ -1070,7 +1096,7 @@ func fetchIOCsMultiPage(
 		}
 
 		allIOCs = append(allIOCs, pageIOCs...)
-		estimatedBytes += int64(len(pageIOCs)) * 300
+		estimatedBytes += estimateCSVBytes(pageIOCs)
 		lastMeta = pageMeta
 		elapsed := time.Since(fetchStart)
 
@@ -1658,6 +1684,32 @@ func toString(v interface{}) string {
 	}
 }
 
+// estimateCSVBytes estimates the CSV byte size for a slice of IOCs.
+// Mirrors the actual CSV row layout: 7 quoted fields, comma-separated, CRLF.
+// Per row overhead: 7 fields × 2 quotes + 6 commas + 2 bytes CRLF = 22 bytes.
+func estimateCSVBytes(iocs []IOC) int64 {
+	const rowOverhead = 22
+	var total int64
+	for i := range iocs {
+		ioc := &iocs[i]
+		primary := ioc.Value
+		if ioc.IP != "" {
+			primary = ioc.IP
+		}
+		tags := extractTags(ioc.Tags)
+		rowLen := int64(len(primary)) +
+			int64(len(toString(ioc.Confidence))) +
+			int64(len(ioc.ThreatType)) +
+			int64(len(ioc.Meta.Severity)) +
+			int64(len(ioc.Source)) +
+			int64(len(tags)) +
+			int64(len(ioc.ExpirationTs)) +
+			rowOverhead
+		total += rowLen
+	}
+	return total
+}
+
 // namedFile wraps an os.File to implement runtime.NamedReadCloser
 type namedFile struct {
 	*os.File
@@ -2153,35 +2205,27 @@ func buildQueryParams(req IngestRequest, job *IngestJob, nextToken string) map[s
 		}
 		// Fresh start (no stored cursor): omit search_after so Anomali returns from the beginning.
 
-		// Allow manual overrides for initial calls only
+		// Allow manual cursor override for initial calls only
 		if req.UpdateIDGt != "" {
 			queryParams["search_after"] = req.UpdateIDGt
-		}
-		if req.ModifiedTsGt != "" {
-			queryParams["modified_ts__gt"] = req.ModifiedTsGt
-		}
-		if req.ModifiedTsLt != "" {
-			queryParams["modified_ts__lt"] = req.ModifiedTsLt
 		}
 	} else {
 		// Fresh start: omit search_after so Anomali returns from the beginning.
 
-		// Allow manual overrides for initial calls only
+		// Allow manual cursor override for initial calls only
 		if req.UpdateIDGt != "" {
 			queryParams["search_after"] = req.UpdateIDGt
 		}
-		if req.ModifiedTsGt != "" {
-			queryParams["modified_ts__gt"] = req.ModifiedTsGt
-		}
-		if req.ModifiedTsLt != "" {
-			queryParams["modified_ts__lt"] = req.ModifiedTsLt
-		}
 	}
-	if req.Limit > 0 {
-		queryParams["limit"] = req.Limit
-	} else {
-		queryParams["limit"] = 1000
+	// Time-range filters apply to every page so the result set stays consistent
+	// across the entire paginated fetch.
+	if req.ModifiedTsGt != "" {
+		queryParams["modified_ts__gt"] = req.ModifiedTsGt
 	}
+	if req.ModifiedTsLt != "" {
+		queryParams["modified_ts__lt"] = req.ModifiedTsLt
+	}
+	queryParams["limit"] = req.Limit
 	if req.ConfidenceGte != nil {
 		queryParams["confidence__gte"] = *req.ConfidenceGte
 	}

@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	fdk "github.com/CrowdStrike/foundry-fn-go"
 	"github.com/crowdstrike/gofalcon/falcon/client"
 	"github.com/crowdstrike/gofalcon/falcon/client/custom_storage"
 	"github.com/crowdstrike/gofalcon/falcon/client/ngsiem"
@@ -2067,16 +2069,18 @@ func TestBuildQueryParamsOptionalFields(t *testing.T) {
 	}
 }
 
-// TestBuildQueryParamsDefaultLimit tests buildQueryParams default limit
+// TestBuildQueryParamsDefaultLimit tests buildQueryParams passes through the caller-clamped limit.
+// Limit clamping (0→1000, >1000→1000) is the responsibility of handleIngest;
+// buildQueryParams trusts the value it receives.
 func TestBuildQueryParamsDefaultLimit(t *testing.T) {
 	req := IngestRequest{
-		Limit: 0, // Zero should default to 1000
+		Limit: 1000, // Caller (handleIngest) clamps 0 → 1000 before calling buildQueryParams
 	}
 
 	params := buildQueryParams(req, nil, "")
 
 	if params["limit"] != 1000 {
-		t.Errorf("Expected default limit = 1000, got %v", params["limit"])
+		t.Errorf("Expected limit = 1000, got %v", params["limit"])
 	}
 }
 
@@ -2124,15 +2128,15 @@ func TestBuildQueryParamsUpdateIDGtOverride(t *testing.T) {
 	}
 }
 
-// TestBuildQueryParamsModifiedTsInitialOnly tests that modified_ts overrides only apply for initial calls
-func TestBuildQueryParamsModifiedTsInitialOnly(t *testing.T) {
+// TestBuildQueryParamsModifiedTsEveryPage tests that modified_ts filters apply to every page
+func TestBuildQueryParamsModifiedTsEveryPage(t *testing.T) {
 	req := IngestRequest{
 		ModifiedTsGt: "2024-01-01T00:00:00Z",
 		ModifiedTsLt: "2024-12-31T23:59:59Z",
 		Limit:        1000,
 	}
 
-	// Initial call (no pagination token, no job) - overrides SHOULD apply
+	// Initial call (no pagination token, no job) - filters SHOULD apply
 	params := buildQueryParams(req, nil, "")
 	if params["modified_ts__gt"] != "2024-01-01T00:00:00Z" {
 		t.Errorf("Expected modified_ts__gt for initial call, got %v", params["modified_ts__gt"])
@@ -2141,13 +2145,13 @@ func TestBuildQueryParamsModifiedTsInitialOnly(t *testing.T) {
 		t.Errorf("Expected modified_ts__lt for initial call, got %v", params["modified_ts__lt"])
 	}
 
-	// Pagination call - overrides should NOT apply (matching Python behavior)
+	// Pagination call - filters MUST still apply so the result set stays consistent
 	paramsWithPagination := buildQueryParams(req, nil, "pagination_token")
-	if _, ok := paramsWithPagination["modified_ts__gt"]; ok {
-		t.Error("modified_ts__gt should NOT be present for pagination calls")
+	if paramsWithPagination["modified_ts__gt"] != "2024-01-01T00:00:00Z" {
+		t.Errorf("Expected modified_ts__gt on pagination call, got %v", paramsWithPagination["modified_ts__gt"])
 	}
-	if _, ok := paramsWithPagination["modified_ts__lt"]; ok {
-		t.Error("modified_ts__lt should NOT be present for pagination calls")
+	if paramsWithPagination["modified_ts__lt"] != "2024-12-31T23:59:59Z" {
+		t.Errorf("Expected modified_ts__lt on pagination call, got %v", paramsWithPagination["modified_ts__lt"])
 	}
 }
 
@@ -3597,9 +3601,9 @@ func TestMaxBatchSizeMBClamping(t *testing.T) {
 		input    int
 		expected int
 	}{
-		{"zero defaults to 20", 0, 20},
-		{"negative defaults to 20", -5, 20},
-		{"within range unchanged", 50, 50},
+		{"zero clamped to 1", 0, 1},
+		{"negative clamped to 1", -5, 1},
+		{"within range unchanged", 25, 25},
 		{"at lower bound", 1, 1},
 		{"at upper bound", 50, 50},
 		{"above upper bound clamped to 50", 200, 50},
@@ -3608,15 +3612,9 @@ func TestMaxBatchSizeMBClamping(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			maxBatchSizeMB := tt.input
-			if maxBatchSizeMB <= 0 {
-				maxBatchSizeMB = 20
-			}
-			if maxBatchSizeMB > 50 {
-				maxBatchSizeMB = 50
-			}
-			if maxBatchSizeMB != tt.expected {
-				t.Errorf("maxBatchSizeMB clamping(%d) = %d, expected %d", tt.input, maxBatchSizeMB, tt.expected)
+			result := clampBatchSizeMB(tt.input)
+			if result != tt.expected {
+				t.Errorf("clampBatchSizeMB(%d) = %d, expected %d", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -3628,26 +3626,20 @@ func TestMaxFetchTimeSecondsClamping(t *testing.T) {
 		input    int
 		expected int
 	}{
-		{"zero defaults to 300", 0, 300},
-		{"negative defaults to 300", -10, 300},
+		{"zero clamped to 30", 0, 30},
+		{"negative clamped to 30", -10, 30},
 		{"within range unchanged", 120, 120},
 		{"at lower bound", 30, 30},
 		{"at upper bound", 600, 600},
 		{"above upper bound clamped to 600", 900, 600},
-		{"below lower bound defaults to 300", -1, 300},
+		{"below lower bound clamped to 30", 15, 30},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			maxFetchTime := tt.input
-			if maxFetchTime <= 0 {
-				maxFetchTime = 300
-			}
-			if maxFetchTime > 600 {
-				maxFetchTime = 600
-			}
-			if maxFetchTime != tt.expected {
-				t.Errorf("maxFetchTime clamping(%d) = %d, expected %d", tt.input, maxFetchTime, tt.expected)
+			result := clampFetchTimeSeconds(tt.input)
+			if result != tt.expected {
+				t.Errorf("clampFetchTimeSeconds(%d) = %d, expected %d", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -3682,22 +3674,43 @@ func TestMultiPageStopConditionEmptyIOCs(t *testing.T) {
 }
 
 func TestMultiPageSizeEstimation(t *testing.T) {
-	// Test that the size estimation logic (300 bytes per IOC) works correctly
+	// Test that estimateCSVBytes produces accurate size estimates
+	// based on actual IOC field lengths instead of a fixed constant.
+
+	// Build a realistic IOC for measurement
+	sampleIOC := IOC{
+		IP:           "10.0.1.100",
+		Confidence:   85,
+		ThreatType:   "c2",
+		Meta:         IOCMeta{Severity: "high"},
+		Source:       "Anomali",
+		Tags:         []map[string]string{{"name": "apt"}, {"name": "malware"}},
+		ExpirationTs: "2026-12-31T00:00:00",
+	}
+	oneIOCBytes := estimateCSVBytes([]IOC{sampleIOC})
+
 	tests := []struct {
-		name           string
-		iocCount       int64
-		maxBatchBytes  int64
-		shouldExceed   bool
+		name          string
+		iocCount      int
+		maxBatchBytes int64
+		shouldExceed  bool
 	}{
-		{"under limit", 100, 1024 * 1024, false},          // 100 * 300 = 30KB < 1MB
-		{"at limit", 3496, 1024 * 1024, true},              // 3496 * 300 = 1048800 >= 1MB
-		{"over limit", 10000, 1024 * 1024, true},            // 10000 * 300 = ~2.9MB > 1MB
-		{"large batch", 350000, 100 * 1024 * 1024, true},   // 350K * 300 = ~100MB >= 100MB
+		{"under limit", 100, 1024 * 1024, false},
+		{"over limit", 15000, 1024 * 1024, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			estimatedBytes := tt.iocCount * 300
+			iocs := make([]IOC, tt.iocCount)
+			for i := range iocs {
+				iocs[i] = sampleIOC
+			}
+			estimatedBytes := estimateCSVBytes(iocs)
+			// Sanity: should scale linearly
+			expectedBytes := oneIOCBytes * int64(tt.iocCount)
+			if estimatedBytes != expectedBytes {
+				t.Errorf("estimateCSVBytes not linear: got %d, want %d", estimatedBytes, expectedBytes)
+			}
 			exceeded := estimatedBytes >= tt.maxBatchBytes
 			if exceeded != tt.shouldExceed {
 				t.Errorf("Size estimation for %d IOCs: estimated=%d, maxBatch=%d, exceeded=%v, expected=%v",
@@ -3736,5 +3749,251 @@ func TestMultiPageNextTokenExtraction(t *testing.T) {
 	token3 := extractNextToken(meta3, iocs, logger)
 	if token3 != "" {
 		t.Errorf("Final page: expected empty token, got %q", token3)
+	}
+}
+
+// ===== Tests for fetchIOCsMultiPage =====
+
+// mockFetchPage builds a fetchPageFunc that returns scripted responses per call index.
+// Each entry in pages is a (iocs, meta, err) triple. The mock also records
+// the Next token it was called with so tests can assert token forwarding.
+type mockPageResult struct {
+	iocs []IOC
+	meta map[string]interface{}
+	err  error
+}
+
+func newMockFetchPage(pages []mockPageResult) (fetchPageFunc, *[]string) {
+	callIdx := 0
+	var recordedTokens []string
+	fn := func(_ context.Context, _ *client.CrowdStrikeAPISpecification,
+		r fdk.RequestOf[IngestRequest], _ *IngestJob, _ *slog.Logger,
+	) ([]IOC, map[string]interface{}, error) {
+		recordedTokens = append(recordedTokens, r.Body.Next)
+		if callIdx >= len(pages) {
+			return nil, nil, fmt.Errorf("unexpected call %d", callIdx)
+		}
+		p := pages[callIdx]
+		callIdx++
+		return p.iocs, p.meta, p.err
+	}
+	return fn, &recordedTokens
+}
+
+func TestFetchIOCsMultiPageSinglePage(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	iocs := []IOC{{IP: "1.2.3.4", IType: "ip", UpdateID: "100"}}
+	mock, tokens := newMockFetchPage([]mockPageResult{
+		{iocs: iocs, meta: map[string]interface{}{} /* no next */},
+	})
+
+	result, meta, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
+		10*1024*1024, 60*time.Second, mock, logger)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 IOC, got %d", len(result))
+	}
+	if meta == nil {
+		t.Error("expected non-nil meta")
+	}
+	if len(*tokens) != 1 {
+		t.Errorf("expected 1 call, got %d", len(*tokens))
+	}
+}
+
+func TestFetchIOCsMultiPageAccumulation(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	page1IOCs := []IOC{{IP: "1.1.1.1", IType: "ip", UpdateID: "100"}}
+	page2IOCs := []IOC{{IP: "2.2.2.2", IType: "ip", UpdateID: "200"}}
+	page3IOCs := []IOC{{IP: "3.3.3.3", IType: "ip", UpdateID: "300"}}
+	mock, _ := newMockFetchPage([]mockPageResult{
+		{iocs: page1IOCs, meta: map[string]interface{}{"next": "https://api.example.com?search_after=100"}},
+		{iocs: page2IOCs, meta: map[string]interface{}{"next": "https://api.example.com?search_after=200"}},
+		{iocs: page3IOCs, meta: map[string]interface{}{}},
+	})
+
+	result, _, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
+		100*1024*1024, 60*time.Second, mock, logger)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 3 {
+		t.Errorf("expected 3 IOCs accumulated, got %d", len(result))
+	}
+}
+
+func TestFetchIOCsMultiPageTokenForwarding(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	page1IOCs := []IOC{{IP: "1.1.1.1", IType: "ip", UpdateID: "100"}}
+	page2IOCs := []IOC{{IP: "2.2.2.2", IType: "ip", UpdateID: "200"}}
+	mock, tokens := newMockFetchPage([]mockPageResult{
+		{iocs: page1IOCs, meta: map[string]interface{}{"next": "https://api.example.com?search_after=100"}},
+		{iocs: page2IOCs, meta: map[string]interface{}{}},
+	})
+
+	r := fdk.RequestOf[IngestRequest]{}
+	r.Body.Next = "initial-token"
+
+	_, _, err := fetchIOCsMultiPage(ctx, nil, r, nil,
+		100*1024*1024, 60*time.Second, mock, logger)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(*tokens) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(*tokens))
+	}
+	if (*tokens)[0] != "initial-token" {
+		t.Errorf("first call should use initial token, got %q", (*tokens)[0])
+	}
+	if (*tokens)[1] != "100" {
+		t.Errorf("second call should use token '100', got %q", (*tokens)[1])
+	}
+}
+
+func TestFetchIOCsMultiPageStopsOnSizeLimit(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	// Create IOCs large enough to exceed a tiny batch limit
+	bigIOC := IOC{IP: "1.1.1.1", IType: "ip", Value: strings.Repeat("x", 500), UpdateID: "100"}
+	page1IOCs := make([]IOC, 100)
+	for i := range page1IOCs {
+		page1IOCs[i] = bigIOC
+	}
+	mock, tokens := newMockFetchPage([]mockPageResult{
+		{iocs: page1IOCs, meta: map[string]interface{}{"next": "https://api.example.com?search_after=100"}},
+		// Should never reach page 2
+		{iocs: []IOC{{IP: "9.9.9.9"}}, meta: map[string]interface{}{}},
+	})
+
+	// Use a tiny batch limit that page1 will exceed
+	tinyBatchBytes := int64(1) // 1 byte
+	result, _, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
+		tinyBatchBytes, 60*time.Second, mock, logger)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 100 {
+		t.Errorf("expected 100 IOCs from first page only, got %d", len(result))
+	}
+	if len(*tokens) != 1 {
+		t.Errorf("expected only 1 fetch call (stopped on size), got %d", len(*tokens))
+	}
+}
+
+func TestFetchIOCsMultiPageStopsOnTimeLimit(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	page1IOCs := []IOC{{IP: "1.1.1.1", IType: "ip", UpdateID: "100"}}
+	mock, tokens := newMockFetchPage([]mockPageResult{
+		{iocs: page1IOCs, meta: map[string]interface{}{"next": "https://api.example.com?search_after=100"}},
+		// Should never reach page 2
+		{iocs: []IOC{{IP: "9.9.9.9"}}, meta: map[string]interface{}{}},
+	})
+
+	// Use a zero-duration time limit so it stops after the first page
+	result, _, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
+		100*1024*1024, 0*time.Second, mock, logger)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 IOC from first page only, got %d", len(result))
+	}
+	if len(*tokens) != 1 {
+		t.Errorf("expected only 1 fetch call (stopped on time), got %d", len(*tokens))
+	}
+}
+
+func TestFetchIOCsMultiPageStopsOnZeroIOCs(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	page1IOCs := []IOC{{IP: "1.1.1.1", IType: "ip", UpdateID: "100"}}
+	mock, tokens := newMockFetchPage([]mockPageResult{
+		{iocs: page1IOCs, meta: map[string]interface{}{"next": "https://api.example.com?search_after=100"}},
+		{iocs: []IOC{}, meta: map[string]interface{}{"next": "https://api.example.com?search_after=200"}},
+		// Should never reach page 3
+		{iocs: []IOC{{IP: "9.9.9.9"}}, meta: map[string]interface{}{}},
+	})
+
+	result, _, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
+		100*1024*1024, 60*time.Second, mock, logger)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Errorf("expected 1 IOC (stopped after zero-IOC page), got %d", len(result))
+	}
+	if len(*tokens) != 2 {
+		t.Errorf("expected 2 fetch calls, got %d", len(*tokens))
+	}
+}
+
+func TestFetchIOCsMultiPageErrorFirstPageFails(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	mock, _ := newMockFetchPage([]mockPageResult{
+		{err: fmt.Errorf("connection refused")},
+	})
+
+	result, meta, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
+		100*1024*1024, 60*time.Second, mock, logger)
+
+	if err == nil {
+		t.Fatal("expected error when first page fails")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("expected 'connection refused' in error, got %q", err.Error())
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %d IOCs", len(result))
+	}
+	if meta != nil {
+		t.Error("expected nil meta")
+	}
+}
+
+func TestFetchIOCsMultiPageErrorLaterPageReturnsAccumulated(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	page1IOCs := []IOC{
+		{IP: "1.1.1.1", IType: "ip", UpdateID: "100"},
+		{IP: "2.2.2.2", IType: "ip", UpdateID: "200"},
+	}
+	mock, _ := newMockFetchPage([]mockPageResult{
+		{iocs: page1IOCs, meta: map[string]interface{}{"next": "https://api.example.com?search_after=200"}},
+		{err: fmt.Errorf("timeout")},
+	})
+
+	result, meta, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
+		100*1024*1024, 60*time.Second, mock, logger)
+
+	// Should NOT return error — returns accumulated IOCs from page 1
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 2 {
+		t.Errorf("expected 2 accumulated IOCs, got %d", len(result))
+	}
+	if meta == nil {
+		t.Error("expected non-nil meta from successful page 1")
 	}
 }

@@ -90,11 +90,6 @@
       "maximum": 600,
       "default": 300
     },
-    "fail_fast_enabled": {
-      "type": "boolean",
-      "description": "Enable early file size estimation to fail fast if projected size exceeds 200 MB limit",
-      "default": false
-    },
     "itype": {
       "type": "string",
       "description": "Filter by indicator type (e.g., bot_ip, mal_domain, apt_email)"

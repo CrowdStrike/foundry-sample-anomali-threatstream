@@ -17,7 +17,7 @@ flowchart TD
     InitCheck -->|No| CreateJob["<b>Create Job Record</b><br/>Generate UUID<br/>Type-specific ID"]
     InitCheck -->|Yes| SkipJob["<b>Skip Job Creation</b><br/>Resume from previous run"]
 
-    CreateJob --> GetState["<b>Get Last Update ID</b><br/>Query: last_update_{type}<br/>65-min lookback buffer"]
+    CreateJob --> GetState["<b>Get Last Update ID</b><br/>Query: last_update_{type}"]
     SkipJob --> UseToken["<b>Use Saved Token</b><br/>Direct: search_after=token"]
 
     GetState --> MultiPage
@@ -28,7 +28,7 @@ flowchart TD
         Query["<b>Query Anomali API</b><br/>type={ioc_type}<br/>limit=1000 per API call"]
         Parse["<b>Parse Response</b><br/>Extract IOCs<br/>Extract meta.next"]
         Accumulate["<b>Accumulate IOCs</b><br/>Append to batch"]
-        StopCheck{"<b>Stop Condition?</b><br/>CSV size >= max_batch_size_mb<br/>Elapsed >= max_fetch_time_seconds<br/>No meta.next<br/>Zero IOCs returned"}
+        StopCheck{"<b>Stop Condition?</b><br/>CSV size >= max_batch_size_mb<br/>Elapsed >= max_fetch_time_seconds<br/>No meta.next"}
 
         Query --> Parse
         Parse --> Accumulate
@@ -92,8 +92,7 @@ The diagram above illustrates the complete flow for a single IOC type. Each func
 ### Initial Call (No next_token)
 1. **Job Creation**: Creates a unique job record with type-specific ID (e.g., `{uuid}_ip`)
 2. **State Retrieval**: Fetches last saved `update_id` from collections (e.g., `last_update_ip`)
-3. **Lookback Buffer**: Applies 65-minute buffer to ensure no IOCs are missed between runs
-4. **Multi-Page Fetch**: Calls `fetchIOCsMultiPage` / `fetch_iocs_multi_page` which loops over Anomali API pages (each limited to 1000 IOCs per API call), accumulating IOCs until a stop condition is met
+3. **Multi-Page Fetch**: Calls `fetchIOCsMultiPage` / `fetch_iocs_multi_page` which loops over Anomali API pages (each limited to 1000 IOCs per API call), accumulating IOCs until a stop condition is met
 
 ### Continuation Calls (next_token present from a previous run)
 1. **Job Skipping**: No new job created, reuses initial job ID for tracking
@@ -119,10 +118,9 @@ In **test mode** (`TEST_MODE=true`), files are written to a local `test_output/`
 
 ### Termination Conditions
 The multi-page fetch loop inside the function stops when any of these conditions is met:
-1. **Size limit reached**: Estimated CSV size >= `max_batch_size_mb` (default 20 MB, max 50 MB)
+1. **Size limit reached**: Estimated CSV size >= `max_batch_size_mb` (default 20 MB, max 50 MB) — size is measured from actual IOC field lengths, not a fixed constant
 2. **Time limit reached**: Elapsed time >= `max_fetch_time_seconds` (default 300 seconds, max 600 seconds)
-3. **No more data**: API response has no `meta.next` token
-4. **Zero IOCs returned**: API returns an empty result set
+3. **No more data**: API response has no `meta.next` token (covers empty result sets, since `extract_next_token_from_meta` requires non-empty IOCs)
 
 ## Production Performance
 
@@ -263,15 +261,15 @@ The function supports multiple filtering parameters for both initial and paginat
 ## Incremental Sync Strategy
 
 **Delta Query Parameters**:
-- **Initial calls**: Create job records and use saved `update_id` state from collections with 65-minute lookback buffer
+- **Initial calls**: Create job records and use saved `update_id` state from collections as `search_after` cursor
 - **Pagination calls**: Use saved `next_token` directly as `search_after` parameter for continuation
 - **Clean separation**: Initial and pagination calls follow separate, non-overlapping code paths to prevent parameter conflicts
-- Includes a 65-minute lookback buffer to ensure no data is missed between hourly workflow runs
+- The monotonic `search_after` cursor on `update_id` guarantees no gaps between runs
 
 **Internal Multi-Page Pagination Architecture**:
 - **Function-managed looping**: The function handles all pagination internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`, looping over multiple Anomali API pages per invocation
 - **Accumulation**: Each API call returns up to 1000 IOCs; the function accumulates IOCs across pages until a stop condition is met
-- **Stop conditions**: Estimated size >= `max_batch_size_mb`, elapsed time >= `max_fetch_time_seconds`, no `meta.next` token, or zero IOCs returned
+- **Stop conditions**: Estimated size >= `max_batch_size_mb`, elapsed time >= `max_fetch_time_seconds`, or no `meta.next` token
 - **Initial calls**: Create jobs, use saved state, fetch multiple pages, return data + optional `next` token if interrupted by size/time limit
 - **Continuation calls**: Skip job creation, resume multi-page fetch from saved `next_token`
 - **Remaining data**: If the function hits its size or time limit mid-ingestion, it returns a `next` token; remaining data is picked up on the next scheduled run (hourly), not via workflow loop

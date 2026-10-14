@@ -37,12 +37,14 @@ Provides automated threat intelligence ingestion from Anomali ThreatStream APIs 
 - `limit`: Number of records per API call (default: 1000, max: 1000)
 - `max_batch_size_mb`: Max estimated CSV data (MB) to accumulate per invocation before processing (default: 20, range: 1-50)
 - `max_fetch_time_seconds`: Max seconds to spend fetching pages from Anomali before processing (default: 300, range: 30-600)
+
+> **Tip for large feeds**: With defaults, each hourly run processes up to ~70k IOCs per type (20 MB / ~300 bytes per IOC). For initial backfill of large feeds, raise `max_batch_size_mb` to 50 and `max_fetch_time_seconds` to 600 to process up to ~175k IOCs per type per run. The function automatically resumes where it left off on the next scheduled run.
+
 - `confidence_gt`: Filter IOCs with confidence score greater than specified value (0-100)
-- `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100)
+- `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100, default: 90)
 - `confidence_lt`: Filter IOCs with confidence score less than specified value (0-100)
 - `confidence_lte`: Filter IOCs with confidence score less than or equal to specified value (0-100)
 - `severity`: Filter IOCs by severity level assigned by Anomali machine-learning algorithms
-- `fail_fast_enabled`: Enable early file size estimation to fail fast if projected size exceeds 200 MB limit (default: false)
 
 ### Filtering by Feed ID
 
@@ -183,44 +185,6 @@ actions:
             status: active
             type: ip
 ```
-
-### Fail-Fast File Size Estimation
-
-For large IOC datasets, the function can estimate final file sizes after processing the first batch of data. This prevents wasting hours on pagination only to fail at the end when a file exceeds the 200 MB Falcon Next-Gen SIEM upload limit.
-
-**Parameter**: `fail_fast_enabled` (default: `false`)
-
-When enabled, the function:
-1. Processes the first batch of IOCs
-2. Calculates bytes per record and distribution by IOC type
-3. Projects final file sizes based on Anomali's `total_count` metadata
-4. Fails immediately with actionable guidance if any file would exceed 200 MB
-
-**When to Enable**: Enable fail-fast if you're ingesting a large ThreatStream dataset for the first time and want early feedback on whether filtering is needed.
-
-**When to Disable**: Keep disabled (default) when you want the function to process as much data as possible before hitting limits, or when you're incrementally syncing smaller batches.
-
-#### Configuring Fail-Fast in the Workflow
-
-Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
-
-```yaml
-actions:
-    IngestIP:
-        properties:
-            fail_fast_enabled: true  # Enable early file size validation
-            limit: 1000
-            repository: search-all
-            status: active
-            type: ip
-```
-
-Repeat for each type-specific action.
-
-**If fail-fast triggers**, the error message suggests filtering strategies:
-1. Use `feed_id` to limit ingestion to specific threat feeds
-2. Use `confidence_gte` to filter low-confidence IOCs (e.g., `confidence_gte: 70`)
-3. Use `type` parameter to ingest specific IOC types separately
 
 ## Data Output
 
