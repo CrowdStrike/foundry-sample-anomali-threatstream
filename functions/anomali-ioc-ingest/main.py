@@ -1490,9 +1490,15 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         q = request.body.get("q", None)
 
         # Parse multi-page fetch parameters
-        max_batch_size_mb = request.body.get("max_batch_size_mb", 20)
+        try:
+            max_batch_size_mb = int(request.body.get("max_batch_size_mb", 20))
+        except (TypeError, ValueError):
+            max_batch_size_mb = 20
         max_batch_size_mb = max(1, min(50, max_batch_size_mb))
-        max_fetch_time_seconds = request.body.get("max_fetch_time_seconds", 300)
+        try:
+            max_fetch_time_seconds = int(request.body.get("max_fetch_time_seconds", 300))
+        except (TypeError, ValueError):
+            max_fetch_time_seconds = 300
         max_fetch_time_seconds = max(30, min(600, max_fetch_time_seconds))
 
         # Parse type filter - only support single type or no type
@@ -1512,7 +1518,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             f"Request parameters: status={status_filter}, type={type_filter}, "
             f"trustedcircles={trustedcircles}, feed_id={feed_id}, next={next_token}, limit={limit}, "
             f"confidence_gte={confidence_gte}, confidence_gt={confidence_gt}, "
-            f"severity={severity}"
+            f"severity={severity}, "
+            f"max_batch_size_mb={max_batch_size_mb}, max_fetch_time_seconds={max_fetch_time_seconds}"
         )
 
         # Initialize clients

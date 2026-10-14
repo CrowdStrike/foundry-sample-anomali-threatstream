@@ -95,7 +95,7 @@ The diagram above illustrates the complete flow for a single IOC type. Each func
 3. **Multi-Page Fetch**: Calls `fetchIOCsMultiPage` / `fetch_iocs_multi_page` which loops over Anomali API pages (each limited to 1000 IOCs per API call), accumulating IOCs until a stop condition is met
 
 ### Continuation Calls (next_token present from a previous run)
-1. **Job Skipping**: No new job created, reuses initial job ID for tracking
+1. **Job Skipping**: No new job created; `job` is `None`/`nil` so no job tracking occurs on pagination calls
 2. **Direct Token Use**: Uses the saved `next_token` directly as the starting `search_after` parameter
 3. **Multi-Page Fetch**: Resumes multi-page accumulation from where the previous run left off
 
@@ -110,6 +110,25 @@ In **production mode**, the function never downloads existing lookup files to `/
 For **new files** (no existing file in NGSIEM), uses `update_lookup_file_entries(update_mode="append")` to create and populate the file.
 
 In **test mode** (`TEST_MODE=true`), files are written to a local `test_output/` directory instead of being uploaded to NGSIEM.
+
+### Cursor Terminology
+
+`next_token`, `search_after`, and `update_id` are the same underlying value — an Anomali monotonic integer — used at different layers:
+
+- **`update_id`**: Anomali's per-IOC monotonic ID. Results are ordered by it (`order_by=update_id`), making it a natural cursor. Persisted to collections between workflow runs as the "last known position."
+- **`search_after`**: The Anomali API query parameter that accepts an `update_id` value. Means "return IOCs with update_id after this value."
+- **`next_token`**: The workflow-level pagination token (`response["next"]`). Extracted from Anomali's `meta.next` URL, which itself contains a `search_after` (or `update_id__gt` / `from_update_id`) parameter — all `update_id` values.
+
+```
+Stored update_id (collections)
+  → search_after (initial API call)
+    → Anomali returns IOCs + meta.next URL containing search_after=<update_id>
+      → extract_next_token_from_meta() parses that update_id out
+        → returned as response["next"] (next_token)
+          → workflow passes it back on continuation call
+            → search_after (pagination API call)
+              → ... repeat until no more data
+```
 
 ### Pagination Decision
 1. **Internal Loop**: The multi-page fetch loop checks `meta.next` after each API call to determine if more pages are available

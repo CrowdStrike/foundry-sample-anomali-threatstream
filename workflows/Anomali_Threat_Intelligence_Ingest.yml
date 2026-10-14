@@ -22,7 +22,6 @@ actions:
         name: Anomali Ingest ip
         id: functions.anomali-ioc-ingest.Anomali Ingest
         properties:
-            confidence_gte: 90
             limit: 1000
             repository: search-all
             status: active
@@ -34,7 +33,6 @@ actions:
         name: Anomali Ingest domain
         id: functions.anomali-ioc-ingest.Anomali Ingest
         properties:
-            confidence_gte: 90
             limit: 1000
             repository: search-all
             status: active
@@ -46,7 +44,6 @@ actions:
         name: Anomali Ingest url
         id: functions.anomali-ioc-ingest.Anomali Ingest
         properties:
-            confidence_gte: 90
             limit: 1000
             repository: search-all
             status: active
@@ -58,7 +55,6 @@ actions:
         name: Anomali Ingest email
         id: functions.anomali-ioc-ingest.Anomali Ingest
         properties:
-            confidence_gte: 90
             limit: 1000
             repository: search-all
             status: active
@@ -70,7 +66,6 @@ actions:
         name: Anomali Ingest hash
         id: functions.anomali-ioc-ingest.Anomali Ingest
         properties:
-            confidence_gte: 90
             limit: 1000
             repository: search-all
             status: active

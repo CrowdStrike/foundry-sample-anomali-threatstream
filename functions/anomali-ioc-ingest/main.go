@@ -138,6 +138,8 @@ type IngestResponse struct {
 	Meta          map[string]interface{}   `json:"meta,omitempty"`
 	Next          string                   `json:"next,omitempty"`
 	ProcessStats  map[string]interface{}   `json:"process_stats,omitempty"`
+	Partial       bool                     `json:"partial,omitempty"`
+	FetchError    string                   `json:"fetch_error,omitempty"`
 }
 
 // IOCMeta represents the meta object nested within an IOC response
@@ -403,25 +405,32 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 	logger.Info("Phase 2: Fetching IOCs from Anomali API")
 	maxBatchBytes := int64(maxBatchSizeMB) * 1024 * 1024
 	maxFetchDuration := time.Duration(maxFetchTime) * time.Second
-	iocs, meta, err := fetchIOCsMultiPage(ctx, falconClient, r, job, maxBatchBytes, maxFetchDuration, fetchIOCsFromAnomali, logger)
+	iocs, meta, fetchErr := fetchIOCsMultiPage(ctx, falconClient, r, job, maxBatchBytes, maxFetchDuration, fetchIOCsFromAnomali, logger)
 	fetchDuration := time.Since(fetchStartTime)
-	if err != nil {
+	if fetchErr != nil && len(iocs) == 0 {
 		logger.Error("Failed to fetch IOCs from Anomali",
-			"error", err,
+			"error", fetchErr,
 			"duration_seconds", fetchDuration.Seconds())
 		if job != nil {
 			job.State = JobFailed
-			job.Error = err.Error()
+			job.Error = fetchErr.Error()
 			_ = updateJob(ctx, falconClient, job, logger)
 		}
 		return fdk.ErrResp(fdk.APIError{
 			Code:    500,
-			Message: fmt.Sprintf("Failed to fetch IOCs: %v", err),
+			Message: fmt.Sprintf("Failed to fetch IOCs: %v", fetchErr),
 		})
 	}
-	logger.Info("Phase 2 complete: IOCs fetched from Anomali",
-		"ioc_count", len(iocs),
-		"duration_seconds", fetchDuration.Seconds())
+	if fetchErr != nil {
+		logger.Warn("Partial fetch from Anomali — processing accumulated IOCs",
+			"error", fetchErr,
+			"ioc_count", len(iocs),
+			"duration_seconds", fetchDuration.Seconds())
+	} else {
+		logger.Info("Phase 2 complete: IOCs fetched from Anomali",
+			"ioc_count", len(iocs),
+			"duration_seconds", fetchDuration.Seconds())
+	}
 
 	if len(iocs) == 0 {
 		// Mark job as completed even with no data
@@ -533,6 +542,12 @@ func handleIngest(ctx context.Context, r fdk.RequestOf[IngestRequest], logger *s
 			"total_new_iocs":      stats.TotalNewIOCs,
 			"files_with_new_data": stats.FilesWithNewData,
 		},
+	}
+
+	// Flag partial results if a fetch error occurred mid-pagination
+	if fetchErr != nil {
+		response.Partial = true
+		response.FetchError = fetchErr.Error()
 	}
 
 	// Extract next token if present
@@ -1026,9 +1041,10 @@ func checkExistingFileMetadata(ctx context.Context, falconClient *client.CrowdSt
 }
 
 // clampBatchSizeMB clamps the batch size (in MB) to the range [1, 50].
+// Zero (the default when the field is omitted) is treated as the default of 20 MB.
 func clampBatchSizeMB(v int) int {
-	if v < 1 {
-		v = 1
+	if v <= 0 {
+		return 20
 	}
 	if v > 50 {
 		v = 50
@@ -1037,9 +1053,10 @@ func clampBatchSizeMB(v int) int {
 }
 
 // clampFetchTimeSeconds clamps the fetch time (in seconds) to the range [30, 600].
+// Zero (the default when the field is omitted) is treated as the default of 300 seconds.
 func clampFetchTimeSeconds(v int) int {
-	if v < 30 {
-		v = 30
+	if v <= 0 {
+		return 300
 	}
 	if v > 600 {
 		v = 600
@@ -1085,12 +1102,13 @@ func fetchIOCsMultiPage(
 		pageIOCs, pageMeta, err := fetchPage(ctx, falconClient, pageRequest, job, logger)
 		if err != nil {
 			// If we already accumulated some IOCs, return what we have with the last good meta
+			// AND the error, so the caller can flag this as a partial result
 			if len(allIOCs) > 0 {
 				logger.Warn("Multi-page fetch: error on page, returning accumulated IOCs",
 					"page", page,
 					"error", err,
 					"total_iocs", len(allIOCs))
-				return allIOCs, lastMeta, nil
+				return allIOCs, lastMeta, err
 			}
 			return nil, nil, err
 		}
@@ -1115,14 +1133,6 @@ func fetchIOCsMultiPage(
 			logger.Info("Multi-page fetch: stopped",
 				"pages", page,
 				"reason", "no more data",
-				"total_iocs", len(allIOCs),
-				"est_size_mb", fmt.Sprintf("%.1f", float64(estimatedBytes)/(1024*1024)))
-			break
-		}
-		if len(pageIOCs) == 0 {
-			logger.Info("Multi-page fetch: stopped",
-				"pages", page,
-				"reason", "zero IOCs returned",
 				"total_iocs", len(allIOCs),
 				"est_size_mb", fmt.Sprintf("%.1f", float64(estimatedBytes)/(1024*1024)))
 			break

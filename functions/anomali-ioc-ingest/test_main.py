@@ -2776,7 +2776,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         self.assertEqual(page2_params["search_after"], "token_page1")
 
     def test_max_batch_size_mb_clamping(self):
-        """Test max_batch_size_mb parameter clamping logic matches production: max(1, min(50, val))."""
+        """Test max_batch_size_mb parameter clamping via on_post: max(1, min(50, val))."""
         test_cases = [
             (0, 1),       # Zero → clamped to floor 1
             (-5, 1),      # Negative → clamped to floor 1
@@ -2784,15 +2784,22 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             (25, 25),     # Within range
             (50, 50),     # At upper bound
             (200, 50),    # Above upper bound → clamped to 50
-            (999, 50),    # Way above → clamped to 50
         ]
         for input_val, expected in test_cases:
-            result = max(1, min(50, input_val))
-            self.assertEqual(result, expected,
-                             f"max_batch_size_mb clamping({input_val}) = {result}, expected {expected}")
+            mock_logger = MagicMock()
+            request = Request()
+            request.body = {"type": "ip", "max_batch_size_mb": input_val}
+            try:
+                main.on_post(request, _config=None, logger=mock_logger)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            logged = [str(c) for c in mock_logger.info.call_args_list]
+            self.assertTrue(
+                any(f"max_batch_size_mb={expected}" in l for l in logged),
+                f"max_batch_size_mb clamping({input_val}): expected {expected} in log, got: {logged}")
 
     def test_max_fetch_time_seconds_clamping(self):
-        """Test max_fetch_time_seconds parameter clamping logic matches production: max(30, min(600, val))."""
+        """Test max_fetch_time_seconds parameter clamping via on_post: max(30, min(600, val))."""
         test_cases = [
             (0, 30),      # Zero → clamped to floor 30
             (-10, 30),    # Negative → clamped to floor 30
@@ -2803,9 +2810,17 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             (900, 600),   # Above upper bound → clamped to 600
         ]
         for input_val, expected in test_cases:
-            result = max(30, min(600, input_val))
-            self.assertEqual(result, expected,
-                             f"max_fetch_time_seconds clamping({input_val}) = {result}, expected {expected}")
+            mock_logger = MagicMock()
+            request = Request()
+            request.body = {"type": "ip", "max_fetch_time_seconds": input_val}
+            try:
+                main.on_post(request, _config=None, logger=mock_logger)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            logged = [str(c) for c in mock_logger.info.call_args_list]
+            self.assertTrue(
+                any(f"max_fetch_time_seconds={expected}" in l for l in logged),
+                f"max_fetch_time_seconds clamping({input_val}): expected {expected} in log, got: {logged}")
 
 
 if __name__ == "__main__":

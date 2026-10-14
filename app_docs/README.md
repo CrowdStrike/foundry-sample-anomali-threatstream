@@ -38,10 +38,10 @@ Provides automated threat intelligence ingestion from Anomali ThreatStream APIs 
 - `max_batch_size_mb`: Max estimated CSV data (MB) to accumulate per invocation before processing (default: 20, range: 1-50)
 - `max_fetch_time_seconds`: Max seconds to spend fetching pages from Anomali before processing (default: 300, range: 30-600)
 
-> **Tip for large feeds**: With defaults, each hourly run processes up to ~70k IOCs per type (20 MB / ~300 bytes per IOC). For initial backfill of large feeds, raise `max_batch_size_mb` to 50 and `max_fetch_time_seconds` to 600 to process up to ~175k IOCs per type per run. The function automatically resumes where it left off on the next scheduled run.
+> **Tip for large feeds**: With defaults, each hourly run processes up to 20 MB. For initial backfill of large feeds, raise `max_batch_size_mb` to 50 and `max_fetch_time_seconds` to 600 to process up to 50 MB per type per run. The function automatically resumes where it left off on the next scheduled run.
 
 - `confidence_gt`: Filter IOCs with confidence score greater than specified value (0-100)
-- `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100, default: 90)
+- `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100)
 - `confidence_lt`: Filter IOCs with confidence score less than specified value (0-100)
 - `confidence_lte`: Filter IOCs with confidence score less than or equal to specified value (0-100)
 - `severity`: Filter IOCs by severity level assigned by Anomali machine-learning algorithms

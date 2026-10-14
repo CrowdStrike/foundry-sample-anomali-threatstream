@@ -3601,8 +3601,8 @@ func TestMaxBatchSizeMBClamping(t *testing.T) {
 		input    int
 		expected int
 	}{
-		{"zero clamped to 1", 0, 1},
-		{"negative clamped to 1", -5, 1},
+		{"zero defaults to 20", 0, 20},
+		{"negative defaults to 20", -5, 20},
 		{"within range unchanged", 25, 25},
 		{"at lower bound", 1, 1},
 		{"at upper bound", 50, 50},
@@ -3626,13 +3626,13 @@ func TestMaxFetchTimeSecondsClamping(t *testing.T) {
 		input    int
 		expected int
 	}{
-		{"zero clamped to 30", 0, 30},
-		{"negative clamped to 30", -10, 30},
+		{"zero defaults to 300", 0, 300},
+		{"negative defaults to 300", -10, 300},
 		{"within range unchanged", 120, 120},
 		{"at lower bound", 30, 30},
 		{"at upper bound", 600, 600},
 		{"above upper bound clamped to 600", 900, 600},
-		{"below lower bound clamped to 30", 15, 30},
+		{"small positive value unchanged", 15, 15},
 	}
 
 	for _, tt := range tests {
@@ -3986,9 +3986,12 @@ func TestFetchIOCsMultiPageErrorLaterPageReturnsAccumulated(t *testing.T) {
 	result, meta, err := fetchIOCsMultiPage(ctx, nil, fdk.RequestOf[IngestRequest]{}, nil,
 		100*1024*1024, 60*time.Second, mock, logger)
 
-	// Should NOT return error — returns accumulated IOCs from page 1
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// Should return error alongside accumulated IOCs from page 1 (partial result)
+	if err == nil {
+		t.Fatal("expected error for partial fetch")
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("expected 'timeout' in error, got %q", err.Error())
 	}
 	if len(result) != 2 {
 		t.Errorf("expected 2 accumulated IOCs, got %d", len(result))
