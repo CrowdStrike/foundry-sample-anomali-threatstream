@@ -1315,6 +1315,29 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             json_response = json.dumps(response.body)
             self.assertNotIn('"next"', json_response)
 
+    @patch.dict(os.environ, {"APP_ID": "test-app"})
+    @patch('main.NGSIEM')
+    @patch('main.APIIntegrations')
+    @patch('main.CustomStorage')
+    def test_on_post_sends_app_id_header(self, mock_custom_storage_class, mock_api_integrations_class, mock_ngsiem_class):
+        """Test that APP_ID is sent as X-CS-APP-ID on API Integration and collection calls."""
+        mock_custom_storage = mock_custom_storage_class.return_value
+        mock_custom_storage.GetObject.side_effect = Exception("Object not found")
+        mock_custom_storage.PutObject.return_value = {"status_code": 200}
+        mock_api_integrations_class.return_value.execute_command_proxy.return_value = {
+            "status_code": 200,
+            "body": {"objects": [], "meta": {"total_count": 0, "next": None}}
+        }
+        mock_ngsiem_class.return_value.get_file.return_value = {"status_code": 404}
+
+        request = Request()
+        request.body = {"repository": "test-repo", "type": "ip"}
+        response = main.on_post(request, _config=None, logger=MagicMock())
+
+        self.assertEqual(response.code, 200)
+        mock_api_integrations_class.assert_called_once_with(ext_headers={"X-CS-APP-ID": "test-app"})
+        mock_custom_storage_class.assert_called_once_with(ext_headers={"X-CS-APP-ID": "test-app"})
+
     def test_extract_next_token_from_meta_variations(self):
         """Test extract_next_token_from_meta with different URL parameter variations."""
         mock_logger = MagicMock()
