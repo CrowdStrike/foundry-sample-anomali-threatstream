@@ -1058,6 +1058,9 @@ func clampFetchTimeSeconds(v int) int {
 	if v <= 0 {
 		return 300
 	}
+	if v < 30 {
+		v = 30
+	}
 	if v > 600 {
 		v = 600
 	}

@@ -3632,7 +3632,7 @@ func TestMaxFetchTimeSecondsClamping(t *testing.T) {
 		{"at lower bound", 30, 30},
 		{"at upper bound", 600, 600},
 		{"above upper bound clamped to 600", 900, 600},
-		{"small positive value unchanged", 15, 15},
+		{"below lower bound clamped to 30", 15, 30},
 	}
 
 	for _, tt := range tests {

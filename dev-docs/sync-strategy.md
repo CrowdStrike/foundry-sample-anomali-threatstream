@@ -12,16 +12,11 @@ flowchart TD
 
     Parallel --> CheckMeta["<b>Phase 1: Check File Metadata</b><br/>list_lookup_files() API<br/>No download to /tmp"]
 
-    CheckMeta --> InitCheck["<b>Initial Call Check</b><br/>next_token present?"]
+    CheckMeta --> CreateJob["<b>Create Job Record</b><br/>Generate UUID<br/>Type-specific ID"]
 
-    InitCheck -->|No| CreateJob["<b>Create Job Record</b><br/>Generate UUID<br/>Type-specific ID"]
-    InitCheck -->|Yes| SkipJob["<b>Skip Job Creation</b><br/>Resume from previous run"]
-
-    CreateJob --> GetState["<b>Get Last Update ID</b><br/>Query: last_update_{type}"]
-    SkipJob --> UseToken["<b>Use Saved Token</b><br/>Direct: search_after=token"]
+    CreateJob --> GetState["<b>Get Last Update ID</b><br/>Query: last_update_{type}<br/>from collections"]
 
     GetState --> MultiPage
-    UseToken --> MultiPage
 
     subgraph MultiPage ["<b>Multi-Page Fetch Loop (fetchIOCsMultiPage)</b>"]
         direction TB
@@ -46,7 +41,7 @@ flowchart TD
 
     Upload --> CheckRemaining{"<b>More data remaining?</b><br/>Stopped due to size/time limit"}
 
-    CheckRemaining -->|Yes| ReturnNext["<b>Return next: token</b><br/>Remaining data picked up<br/>on next scheduled run"]
+    CheckRemaining -->|Yes| ReturnNext["<b>Save last token as update_id</b><br/>Remaining data picked up<br/>on next scheduled run"]
 
     CheckRemaining -->|No| SaveState["<b>Save Update ID</b><br/>Store highest update_id<br/>to last_update_{type}"]
 
@@ -60,9 +55,7 @@ flowchart TD
     style Parallel fill:#e1f5ff,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
     style End fill:#c8e6c9,stroke:#2e7d32,stroke-width:3px,color:#000,font-size:14px
     style CreateJob fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
-    style SkipJob fill:#fff9c4,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
     style GetState fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000,font-size:13px
-    style UseToken fill:#e1bee7,stroke:#6a1b9a,stroke-width:2px,color:#000,font-size:13px
     style Query fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
     style Parse fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
     style Accumulate fill:#b3e5fc,stroke:#0277bd,stroke-width:2px,color:#000,font-size:13px
@@ -76,7 +69,6 @@ flowchart TD
     style Return0 fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#000,font-size:13px
     style Return0Final fill:#ffcdd2,stroke:#c62828,stroke-width:2px,color:#000,font-size:13px
     style ReturnNext fill:#c8e6c9,stroke:#2e7d32,stroke-width:2px,color:#000,font-size:13px
-    style InitCheck fill:#fff59d,stroke:#f57f17,stroke-width:2px,color:#000,font-size:13px
     style MultiPage fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000,font-size:13px
 ```
 
@@ -89,15 +81,18 @@ The diagram above illustrates the complete flow for a single IOC type. Each func
 2. **Missing File Recovery**: If a previously-tracked file is missing, clears its `update_id` to trigger a fresh start for that type
 3. **Fresh Start Detection**: If no files exist at all, clears all collection data
 
-### Initial Call (No next_token)
+### Each Scheduled Run (Normal Path)
 1. **Job Creation**: Creates a unique job record with type-specific ID (e.g., `{uuid}_ip`)
-2. **State Retrieval**: Fetches last saved `update_id` from collections (e.g., `last_update_ip`)
+2. **State Retrieval**: Fetches last saved `update_id` from collections (e.g., `last_update_ip`) — this is the cursor saved at the end of the previous run
 3. **Multi-Page Fetch**: Calls `fetchIOCsMultiPage` / `fetch_iocs_multi_page` which loops over Anomali API pages (each limited to 1000 IOCs per API call), accumulating IOCs until a stop condition is met
 
-### Continuation Calls (next_token present from a previous run)
-1. **Job Skipping**: No new job created; `job` is `None`/`nil` so no job tracking occurs on pagination calls
-2. **Direct Token Use**: Uses the saved `next_token` directly as the starting `search_after` parameter
-3. **Multi-Page Fetch**: Resumes multi-page accumulation from where the previous run left off
+### Manual Override (Optional `next` Parameter)
+The function accepts an optional `next` parameter that can be supplied manually (e.g., for debugging or one-off recovery). When present:
+1. **Job Skipping**: No new job created; `job` is `None`/`nil` so no job tracking occurs
+2. **Direct Token Use**: Uses the provided `next` value directly as the `search_after` parameter, bypassing the saved `update_id`
+3. **Multi-Page Fetch**: Resumes multi-page accumulation from the specified position
+
+> **Note**: The workflow does not pass `next` back automatically — there are no loops or variables. Each scheduled run always resumes from the `update_id` saved in collections. The `next` field in the function response exists for observability (logging the last cursor position) and to support manual overrides if needed.
 
 ### Data Processing (Server-Side Deduplication)
 
@@ -113,27 +108,26 @@ In **test mode** (`TEST_MODE=true`), files are written to a local `test_output/`
 
 ### Cursor Terminology
 
-`next_token`, `search_after`, and `update_id` are the same underlying value — an Anomali monotonic integer — used at different layers:
+`update_id`, `search_after`, and `next_token` are the same underlying value — an Anomali monotonic integer — used at different layers:
 
 - **`update_id`**: Anomali's per-IOC monotonic ID. Results are ordered by it (`order_by=update_id`), making it a natural cursor. Persisted to collections between workflow runs as the "last known position."
 - **`search_after`**: The Anomali API query parameter that accepts an `update_id` value. Means "return IOCs with update_id after this value."
-- **`next_token`**: The workflow-level pagination token (`response["next"]`). Extracted from Anomali's `meta.next` URL, which itself contains a `search_after` (or `update_id__gt` / `from_update_id`) parameter — all `update_id` values.
+- **`next_token`**: An internal pagination value extracted from Anomali's `meta.next` URL. Used within `fetchIOCsMultiPage` to advance through pages during a single invocation. Also included in the function response for observability, but the workflow does not feed it back — cross-run continuation relies on the saved `update_id` in collections.
 
 ```
 Stored update_id (collections)
   → search_after (initial API call)
     → Anomali returns IOCs + meta.next URL containing search_after=<update_id>
       → extract_next_token_from_meta() parses that update_id out
-        → returned as response["next"] (next_token)
-          → workflow passes it back on continuation call
-            → search_after (pagination API call)
-              → ... repeat until no more data
+        → used as search_after for next internal page (within same invocation)
+        → ... repeat until stop condition (size/time limit or no more data)
+  → highest update_id saved to collections for next scheduled run
 ```
 
 ### Pagination Decision
 1. **Internal Loop**: The multi-page fetch loop checks `meta.next` after each API call to determine if more pages are available
 2. **Extract Token**: Parses `meta.next` URL for pagination parameter (priority: `search_after` > `update_id__gt` > `from_update_id`)
-3. **Stop or Continue**: If a stop condition is reached mid-ingestion, the function returns a `next` token so remaining data is picked up on the next scheduled run (hourly)
+3. **Stop or Continue**: If a stop condition is reached mid-ingestion, the function saves the highest `update_id` to collections so the next scheduled run resumes from that point
 
 ### Termination Conditions
 The multi-page fetch loop inside the function stops when any of these conditions is met:
@@ -195,7 +189,7 @@ The `upload_csv_files_to_ngsiem()` router selects the upload path based on envir
 ## Workflow Termination & Missing File Recovery
 
 ### Workflow Termination
-The function omits the `"next"` field from the response body when all available data has been ingested. If the function hits its size or time limit mid-ingestion, it returns a `next` token so remaining data is picked up on the next scheduled run.
+Each function invocation saves the highest `update_id` processed to its type-specific collection key. When all available data has been ingested, no further cursor advancement is needed. If the function hits its size or time limit mid-ingestion, the saved `update_id` marks the resume point for the next scheduled run.
 
 ### Missing File Recovery
 When a lookup file is deleted, the system detects this via the `list_lookup_files()` check and triggers recovery:
@@ -272,26 +266,26 @@ The function supports multiple filtering parameters for both initial and paginat
 - `last_update_email` - tracks email sync state
 - `last_update_hash` - tracks file hash sync state
 
-**Job Management**: Job creation optimized for workflow-managed pagination:
-- **Initial calls**: Create job record with type-specific ID: `{uuid}_ip`, `{uuid}_domain`, etc.
-- **Pagination calls**: Skip job creation entirely to reduce overhead while maintaining audit trail
+**Job Management**: Job creation optimized for scheduled execution:
+- **Normal runs**: Create job record with type-specific ID: `{uuid}_ip`, `{uuid}_domain`, etc.
+- **Manual override** (optional `next` parameter): Skip job creation entirely to reduce overhead
 - Job tracking includes `ioc_type` field for correlation and debugging
 
 ## Incremental Sync Strategy
 
 **Delta Query Parameters**:
-- **Initial calls**: Create job records and use saved `update_id` state from collections as `search_after` cursor
-- **Pagination calls**: Use saved `next_token` directly as `search_after` parameter for continuation
-- **Clean separation**: Initial and pagination calls follow separate, non-overlapping code paths to prevent parameter conflicts
+- **Each scheduled run**: Creates job records and uses the saved `update_id` from collections as the `search_after` cursor
+- **Manual override**: An optional `next` parameter can be provided to bypass the saved `update_id` (e.g., for debugging)
+- **Clean separation**: Normal runs and manual-override runs follow separate, non-overlapping code paths to prevent parameter conflicts
 - The monotonic `search_after` cursor on `update_id` guarantees no gaps between runs
 
 **Internal Multi-Page Pagination Architecture**:
 - **Function-managed looping**: The function handles all pagination internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`, looping over multiple Anomali API pages per invocation
 - **Accumulation**: Each API call returns up to 1000 IOCs; the function accumulates IOCs across pages until a stop condition is met
 - **Stop conditions**: Estimated size >= `max_batch_size_mb`, elapsed time >= `max_fetch_time_seconds`, or no `meta.next` token
-- **Initial calls**: Create jobs, use saved state, fetch multiple pages, return data + optional `next` token if interrupted by size/time limit
-- **Continuation calls**: Skip job creation, resume multi-page fetch from saved `next_token`
-- **Remaining data**: If the function hits its size or time limit mid-ingestion, it returns a `next` token; remaining data is picked up on the next scheduled run (hourly), not via workflow loop
+- **Each scheduled run**: Creates jobs, uses saved `update_id` from collections, fetches multiple pages, saves the highest `update_id` back to collections
+- **Manual override**: Skips job creation, resumes multi-page fetch from the provided `next` value
+- **Remaining data**: If the function hits its size or time limit mid-ingestion, it saves the highest `update_id` to collections; remaining data is picked up on the next scheduled run (hourly), not via workflow loop
 - **Cursor advancement**: Even when no supported IOC types produce CSV files, the cursor is advanced to avoid re-fetching the same page
 
 **Token Progression**: Parses the API's `meta.next` URL to extract the pagination cursor with the following priority order:
@@ -373,7 +367,7 @@ This comprehensive solution provides:
 - **No workflow loops**: The `loops:` section, `CreateVariable`, and all `UpdateVariable*` actions have been removed
 - **Function-level pagination**: Each function invocation handles multi-page fetching internally via `fetchIOCsMultiPage` / `fetch_iocs_multi_page`
 - **Size/time limits**: `max_batch_size_mb` (default 20, max 50) and `max_fetch_time_seconds` (default 300, max 600) control how much data is processed per invocation
-- **Cross-run continuation**: If the function hits its size/time limit, it returns a `next` token; remaining data is picked up on the next scheduled run
+- **Cross-run continuation**: If the function hits its size/time limit, it saves the highest `update_id` to collections; the next scheduled run resumes from that point
 - **Schedule**: Hourly execution (`0 0/1 * * *`) with concurrent runs disabled
 - **Timeout**: 2 hours (7200 seconds) maximum execution time
 
