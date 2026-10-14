@@ -84,7 +84,7 @@ def _estimate_csv_bytes(iocs):
     Per-field overhead: 2 quote chars + 1 comma (last field gets newline instead).
     """
     # Per row: 7 fields × 2 quotes + 6 commas + 2 bytes CRLF = 22 bytes overhead
-    ROW_OVERHEAD = 22
+    row_overhead = 22
     total = 0
     for ioc in iocs:
         tags = ioc.get("tags", [])
@@ -100,7 +100,7 @@ def _estimate_csv_bytes(iocs):
             + len(str(ioc.get("source", "")))
             + len(tags_str)
             + len(str(ioc.get("expiration_ts", "")))
-            + ROW_OVERHEAD
+            + row_overhead
         )
         total += row_len
     return total

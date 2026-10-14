@@ -2018,7 +2018,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         request.body = {"type": "ip", "limit": 0}
         try:
             main.on_post(request, _config=None, logger=mock_logger)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass  # Will fail later due to unmocked APIs; we only check the log
         logged = [str(c) for c in mock_logger.info.call_args_list]
         self.assertTrue(any("limit=1000" in l for l in logged),
@@ -2031,7 +2031,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         request.body = {"type": "ip", "limit": -1}
         try:
             main.on_post(request, _config=None, logger=mock_logger)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
         logged = [str(c) for c in mock_logger.info.call_args_list]
         self.assertTrue(any("limit=1000" in l for l in logged),
@@ -2046,7 +2046,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             main.on_post(request, _config=None, logger=mock_logger)
         except TypeError:
             self.fail("limit=None should not raise TypeError")
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
         logged = [str(c) for c in mock_logger.info.call_args_list]
         self.assertTrue(any("limit=1000" in l for l in logged),
@@ -2061,7 +2061,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             main.on_post(request, _config=None, logger=mock_logger)
         except TypeError:
             self.fail("limit='abc' should not raise TypeError")
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
         logged = [str(c) for c in mock_logger.info.call_args_list]
         self.assertTrue(any("limit=1000" in l for l in logged),
@@ -2074,7 +2074,7 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         request.body = {"type": "ip", "limit": 500}
         try:
             main.on_post(request, _config=None, logger=mock_logger)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
         logged = [str(c) for c in mock_logger.info.call_args_list]
         self.assertTrue(any("limit=500" in l for l in logged),
@@ -2662,8 +2662,8 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         ]
 
         # Measure the actual estimated size of one page after slimming
-        slimmed_page = [main._slim_ioc(ioc) for ioc in big_page]
-        one_page_bytes = main._estimate_csv_bytes(slimmed_page)
+        slimmed_page = [main._slim_ioc(ioc) for ioc in big_page]  # pylint: disable=protected-access
+        one_page_bytes = main._estimate_csv_bytes(slimmed_page)  # pylint: disable=protected-access
 
         mock_fetch.side_effect = [
             (big_page, {"next": "http://example.com?search_after=100"}),
