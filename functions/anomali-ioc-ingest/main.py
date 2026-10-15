@@ -49,7 +49,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from logging import Logger
 from typing import Dict, List, Any, Optional, Set
 from urllib.parse import urlparse, parse_qs
@@ -59,6 +59,51 @@ from falconpy import APIIntegrations, NGSIEM, CustomStorage
 
 
 FUNC = Function.instance()
+
+# Hard timeout slightly below the 15-minute Foundry function limit so that
+# retry loops abort gracefully before the platform kills the process.
+FUNCTION_TIMEOUT = 14 * 60  # seconds
+
+# Fields used by process_iocs_to_csv and cursor tracking
+_IOC_KEEP_FIELDS = frozenset({
+    "itype", "ip", "value", "confidence", "threat_type",
+    "meta", "source", "tags", "expiration_ts", "update_id", "id",
+})
+
+
+def _slim_ioc(ioc):
+    """Strip an IOC dict to only the fields needed downstream."""
+    return {k: ioc[k] for k in _IOC_KEEP_FIELDS if k in ioc}
+
+
+def _estimate_csv_bytes(iocs):
+    """Estimate the CSV byte size for a list of slimmed IOC dicts.
+
+    Mirrors the actual CSV row layout produced by process_iocs_to_csv:
+    7 quoted fields per row, comma-separated, with CRLF line endings.
+    Per-field overhead: 2 quote chars + 1 comma (last field gets newline instead).
+    """
+    # Per row: 7 fields × 2 quotes + 6 commas + 2 bytes CRLF = 22 bytes overhead
+    row_overhead = 22
+    total = 0
+    for ioc in iocs:
+        tags = ioc.get("tags", [])
+        if isinstance(tags, list):
+            tags_str = ",".join(tag.get("name", "") for tag in tags if tag.get("name"))
+        else:
+            tags_str = ""
+        row_len = (
+            len(str(ioc.get("ip", ioc.get("value", ""))))
+            + len(str(ioc.get("confidence", "")))
+            + len(str(ioc.get("threat_type", "")))
+            + len(str(ioc.get("meta", {}).get("severity", "")))
+            + len(str(ioc.get("source", "")))
+            + len(tags_str)
+            + len(str(ioc.get("expiration_ts", "")))
+            + row_overhead
+        )
+        total += row_len
+    return total
 
 
 class AnomaliFunctionError(Exception):
@@ -93,7 +138,7 @@ def _is_retryable_response(response: Any) -> bool:
 
 def _call_with_retry(api_call, logger: Logger, description: str,
                      max_retries: int = 5, base_backoff: int = 5,
-                     max_backoff: int = 60):
+                     max_backoff: int = 60, deadline: float = 0):
     """Execute an API call with retry logic for transient errors.
 
     Args:
@@ -128,6 +173,8 @@ def _call_with_retry(api_call, logger: Logger, description: str,
             f"Retryable error (HTTP {status_code}) {description}, "
             f"retrying in {backoff}s (attempt {attempt}/{max_retries})"
         )
+        if deadline and time.time() >= deadline:
+            raise AnomaliFunctionError(f"{description} aborted: function deadline reached")
         time.sleep(backoff)
 
     # Should not reach here, but satisfy linters
@@ -234,7 +281,8 @@ def save_update_id(
         custom_storage: CustomStorage,
         update_data: Dict,
         ioc_type: Optional[str],
-        logger: Logger
+        logger: Logger,
+        deadline: float = 0
 ):
     """Save the current update_id to collections"""
     try:
@@ -251,7 +299,8 @@ def save_update_id(
                                              collection_name=COLLECTION_UPDATE_TRACKER,
                                              object_key=object_key),
             logger,
-            f"saving update_id for {ioc_type or 'all types'}"
+            f"saving update_id for {ioc_type or 'all types'}",
+            deadline=deadline
         )
 
         if response["status_code"] != 200:
@@ -322,12 +371,6 @@ def create_job(
         # returns search_after in meta.next, and it accepts a plain update_id value.
         # Avoid update_id__gt: some ThreatStream accounts reject it with HTTP 400.
         job_params["search_after"] = last_update.get("update_id", "")
-        # Add lookback time for incremental sync - use 65 minutes to ensure
-        # no data gaps with hourly scheduling
-        lookback_time = now - timedelta(minutes=65)
-        job_params["modified_ts_gt"] = lookback_time.isoformat()
-        # Add upper time bound for incremental sync to ensure consistency
-        job_params["modified_ts_lt"] = now.isoformat()
     else:
         # Fresh start for this type - get all available data (no time constraints).
         # Omit the cursor entirely so Anomali returns from the beginning.
@@ -393,11 +436,105 @@ def format_elapsed_time(elapsed_seconds: float) -> str:
     return f"{elapsed_seconds:.1f}s"
 
 
+def fetch_iocs_multi_page(
+        api_integrations: APIIntegrations,
+        base_params: Dict[str, Any],
+        max_batch_bytes: int,
+        max_fetch_time: int,
+        logger: Logger,
+        deadline: float = 0,
+) -> tuple[List[Dict], Dict, Optional[str]]:
+    """Fetch multiple pages of IOCs from Anomali, accumulating results.
+
+    Loops internally over Anomali pages until the estimated CSV size reaches
+    max_batch_bytes or max_fetch_time seconds have elapsed.
+
+    Args:
+        api_integrations: API integration client.
+        base_params: Initial query parameters (including search_after if paginating).
+        max_batch_bytes: Max estimated CSV bytes before stopping.
+        max_fetch_time: Max seconds to spend fetching pages.
+        logger: Logger instance.
+
+    Returns:
+        Tuple of (all accumulated IOCs, last page's meta dict, fetch_error).
+        fetch_error is None on a clean fetch, or the error string when a
+        mid-loop failure caused an early return with partial results.
+    """
+    all_iocs: List[Dict] = []
+    estimated_bytes = 0
+    last_meta: Dict = {}
+    fetch_start = time.time()
+    current_params = base_params.copy()
+    page = 0
+
+    logger.info(
+        f"Multi-page fetch: starting (max_size={max_batch_bytes // (1024 * 1024)}MB, "
+        f"max_time={max_fetch_time}s)"
+    )
+
+    while True:
+        page += 1
+
+        try:
+            page_iocs, page_meta = fetch_iocs_from_anomali(
+                api_integrations, current_params, logger, deadline=deadline
+            )
+        except Exception as e:
+            # If we already accumulated some IOCs, return what we have
+            if all_iocs:
+                logger.warning(
+                    f"Multi-page fetch: error on page {page}, returning accumulated IOCs: {e}"
+                )
+                return all_iocs, last_meta, str(e)
+            raise
+
+        slimmed = [_slim_ioc(ioc) for ioc in page_iocs]
+        all_iocs.extend(slimmed)
+        estimated_bytes += _estimate_csv_bytes(slimmed)
+        last_meta = page_meta
+        elapsed = time.time() - fetch_start
+
+        logger.info(
+            f"Multi-page fetch: page {page} fetched {len(page_iocs)} IOCs "
+            f"(total={len(all_iocs)}, est_size={estimated_bytes / (1024 * 1024):.1f}MB, "
+            f"elapsed={elapsed:.1f}s)"
+        )
+
+        # Extract next token from this page's meta
+        page_next_token = extract_next_token_from_meta(page_meta, page_iocs, logger)
+
+        # Check stop conditions
+        if not page_next_token:
+            logger.info(
+                f"Multi-page fetch: stopped after {page} pages (no more data), "
+                f"total IOCs={len(all_iocs)}, est_size={estimated_bytes / (1024 * 1024):.1f}MB"
+            )
+            break
+        if estimated_bytes >= max_batch_bytes:
+            logger.info(
+                f"Multi-page fetch: stopped after {page} pages (size limit reached), "
+                f"total IOCs={len(all_iocs)}, est_size={estimated_bytes / (1024 * 1024):.1f}MB"
+            )
+            break
+        if elapsed >= max_fetch_time:
+            logger.info(
+                f"Multi-page fetch: stopped after {page} pages (time limit reached), "
+                f"total IOCs={len(all_iocs)}, elapsed={elapsed:.1f}s"
+            )
+            break
+
+        # Update search_after for the next page
+        current_params = current_params.copy()
+        current_params["search_after"] = page_next_token
+
+    return all_iocs, last_meta, None
 def fetch_iocs_from_anomali(
         api_integrations: APIIntegrations,
         params: Dict[str, Any],
         logger: Logger,
-        max_retries: int = 5
+        max_retries: int = 5,
+        deadline: float = 0
 ) -> tuple[List[Dict], Dict]:
     """Fetch IOCs from Anomali ThreatStream using API Integration with retry logic for rate limiting"""
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals,too-many-nested-blocks
@@ -460,6 +597,10 @@ def fetch_iocs_from_anomali(
                         f"Rate limited ({rate_limit_message}), retrying in "
                         f"{retry_after:.1f}s (attempt {attempt + 1}/{max_retries})"
                     )
+                    if deadline and time.time() >= deadline:
+                        raise AnomaliFunctionError(
+                            "Anomali API fetch aborted: function deadline reached"
+                        )
                     time.sleep(retry_after)
                     continue
 
@@ -488,6 +629,10 @@ def fetch_iocs_from_anomali(
         except Exception as e:
             if attempt < max_retries:
                 logger.warning(f"Error on attempt {attempt + 1}: {str(e)}, retrying...")
+                if deadline and time.time() >= deadline:
+                    raise AnomaliFunctionError(
+                        "Anomali API fetch aborted: function deadline reached"
+                    ) from e
                 time.sleep(1 + attempt)  # Progressive delay for other errors
                 continue
 
@@ -499,7 +644,8 @@ def fetch_iocs_from_anomali(
 
 
 def check_existing_file_metadata(
-        repository: str, ioc_type: Optional[str], logger: Logger
+        repository: str, ioc_type: Optional[str], logger: Logger,
+        deadline: float = 0
 ) -> Set[str]:
     """Check which lookup files exist in NGSIEM without downloading.
 
@@ -551,7 +697,8 @@ def check_existing_file_metadata(
                     search_domain=repository
                 ),
                 logger,
-                f"metadata check for {filename}"
+                f"metadata check for {filename}",
+                deadline=deadline
             )
 
             status_code = resp.get("status_code", 0) if isinstance(resp, dict) else 0
@@ -771,7 +918,8 @@ def process_iocs_to_csv(
 
 def upload_entries_to_ngsiem(
         csv_files: List[str], repository: str,
-        existing_files: Set[str], logger: Logger
+        existing_files: Set[str], logger: Logger,
+        deadline: float = 0
 ) -> List[Dict]:
     """Upload new IOC rows using update_lookup_file_entries() for server-side deduplication.
 
@@ -838,7 +986,8 @@ def upload_entries_to_ngsiem(
                         update_mode="append"
                     )
 
-            response = _call_with_retry(_do_update, logger, f"uploading {filename}")
+            response = _call_with_retry(_do_update, logger, f"uploading {filename}",
+                                        deadline=deadline)
             status_code = response.get("status_code", 0) if isinstance(response, dict) else 0
 
             # Log the raw response for troubleshooting
@@ -872,7 +1021,7 @@ def upload_entries_to_ngsiem(
 
 def upload_csv_files_to_ngsiem(
         csv_files: List[str], repository: str, logger: Logger,
-        existing_files: Optional[Set[str]] = None
+        existing_files: Optional[Set[str]] = None, deadline: float = 0
 ) -> List[Dict]:
     """Upload CSV files to Falcon Next-Gen SIEM as lookup files or write locally in test mode.
 
@@ -887,9 +1036,10 @@ def upload_csv_files_to_ngsiem(
 
     # Use server-side update when existing files are present (production stream path)
     if existing_files:
-        return upload_entries_to_ngsiem(csv_files, repository, existing_files, logger)
+        return upload_entries_to_ngsiem(csv_files, repository, existing_files, logger,
+                                        deadline=deadline)
 
-    return upload_csv_files_to_ngsiem_actual(csv_files, repository, logger)
+    return upload_csv_files_to_ngsiem_actual(csv_files, repository, logger, deadline=deadline)
 
 def upload_csv_files_locally(csv_files: List[str], repository: str, logger: Logger) -> List[Dict]:
     """Write CSV files to local test directory simulating NGSIEM storage"""
@@ -932,7 +1082,8 @@ def upload_csv_files_locally(csv_files: List[str], repository: str, logger: Logg
 
     return results
 
-def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, logger: Logger) -> List[Dict]:
+def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, logger: Logger,
+                                      deadline: float = 0) -> List[Dict]:
     """Upload CSV files to Falcon Next-Gen SIEM as lookup files (original implementation)"""
     ngsiem = NGSIEM()
     results = []
@@ -945,7 +1096,8 @@ def upload_csv_files_to_ngsiem_actual(csv_files: List[str], repository: str, log
             response = _call_with_retry(
                 lambda f=csv_file: ngsiem.upload_file(lookup_file=f, repository=repository),
                 logger,
-                f"uploading {filename}"
+                f"uploading {filename}",
+                deadline=deadline
             )
 
             # Log the raw response for troubleshooting
@@ -1194,7 +1346,8 @@ def check_and_recover_missing_files(  # pylint: disable=too-many-branches
         repository: str,
         type_filter: Optional[str],
         custom_storage: CustomStorage,
-        logger: Logger
+        logger: Logger,
+        deadline: float = 0
 ) -> tuple[bool, Set[str]]:
     """Check for existing lookup files and handle missing file recovery.
 
@@ -1213,10 +1366,12 @@ def check_and_recover_missing_files(  # pylint: disable=too-many-branches
 
     if not type_filter:
         logger.info("No type filter specified - checking metadata for existing Anomali lookup files")
-        existing_files = check_existing_file_metadata(repository, None, logger)
+        existing_files = check_existing_file_metadata(repository, None, logger,
+                                                      deadline=deadline)
     else:
         logger.info(f"Checking metadata for existing files for type: {type_filter}")
-        existing_files = check_existing_file_metadata(repository, type_filter, logger)
+        existing_files = check_existing_file_metadata(repository, type_filter, logger,
+                                                      deadline=deadline)
 
     if not existing_files:
         if not type_filter:
@@ -1294,12 +1449,13 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
     - trustedcircles: Comma-separated feed IDs for filtering (e.g., "11631,12345")
     - feed_id: Comma-separated feed IDs for filtering (alternative to trustedcircles)
     - update_id_gt: Update ID greater than (for manual overrides)
-    - limit: Number of records to fetch per call (default: 1000, max: 1000)
+    - limit: Number of records to fetch per API call (default: 1000, max: 1000 - Anomali API limit)
     - next: Continuation token for workflow pagination
     """
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals
 
     start_time = time.time()
+    deadline = start_time + FUNCTION_TIMEOUT
 
     try:
         # Parse request parameters
@@ -1308,7 +1464,12 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         trustedcircles = request.body.get("trustedcircles", None)  # Feed ID filtering
         feed_id = request.body.get("feed_id", None)  # Feed ID filtering (alternative parameter)
         next_token = request.body.get("next", None)  # Workflow pagination continuation
-        limit = request.body.get("limit", 1000)  # Number of records per API call
+        try:
+            limit = int(request.body.get("limit", 1000))
+        except (TypeError, ValueError):
+            limit = 1000
+        if limit <= 0 or limit > 1000:
+            limit = 1000
 
         # Parse confidence filters
         confidence_gt = request.body.get("confidence_gt", None)
@@ -1328,6 +1489,18 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
         search_filter = request.body.get("search_filter", None)
         q = request.body.get("q", None)
 
+        # Parse multi-page fetch parameters
+        try:
+            max_batch_size_mb = int(request.body.get("max_batch_size_mb", 20))
+        except (TypeError, ValueError):
+            max_batch_size_mb = 20
+        max_batch_size_mb = max(1, min(50, max_batch_size_mb))
+        try:
+            max_fetch_time_seconds = int(request.body.get("max_fetch_time_seconds", 300))
+        except (TypeError, ValueError):
+            max_fetch_time_seconds = 300
+        max_fetch_time_seconds = max(30, min(600, max_fetch_time_seconds))
+
         # Parse type filter - only support single type or no type
         type_filter = request.body.get("type", None)  # Single IOC type filter
         if type_filter and ',' in str(type_filter):
@@ -1345,7 +1518,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
             f"Request parameters: status={status_filter}, type={type_filter}, "
             f"trustedcircles={trustedcircles}, feed_id={feed_id}, next={next_token}, limit={limit}, "
             f"confidence_gte={confidence_gte}, confidence_gt={confidence_gt}, "
-            f"severity={severity}"
+            f"severity={severity}, "
+            f"max_batch_size_mb={max_batch_size_mb}, max_fetch_time_seconds={max_fetch_time_seconds}"
         )
 
         # Initialize clients
@@ -1365,7 +1539,7 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
             # Check for existing files and handle missing file recovery
             should_start_fresh, existing_files = check_and_recover_missing_files(
-                repository, type_filter, custom_storage, logger
+                repository, type_filter, custom_storage, logger, deadline=deadline
             )
 
             phase1_elapsed = time.time() - phase1_start
@@ -1408,10 +1582,14 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
 
                 logger.info(f"Final query_params before API call: {query_params}")
 
-                # Phase 2: Fetch IOCs from Anomali
+                # Phase 2: Fetch IOCs from Anomali (multi-page)
                 phase2_start = time.time()
                 logger.info("Phase 2: Fetching IOCs from Anomali...")
-                iocs, meta = fetch_iocs_from_anomali(api_integrations, query_params, logger)
+                max_batch_bytes = max_batch_size_mb * 1024 * 1024
+                iocs, meta, fetch_error = fetch_iocs_multi_page(
+                    api_integrations, query_params, max_batch_bytes, max_fetch_time_seconds, logger,
+                    deadline=deadline
+                )
 
                 phase2_elapsed = time.time() - phase2_start
                 logger.info(f"Phase 2 complete: Fetched {len(iocs)} IOCs in {format_elapsed_time(phase2_elapsed)}")
@@ -1461,7 +1639,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                             "next_url": (meta.get("next") or "") if meta else "",
                             "update_id": max_update_id
                         }
-                        save_update_id(custom_storage, update_data, type_filter, logger)
+                        save_update_id(custom_storage, update_data, type_filter, logger,
+                                       deadline=deadline)
 
                     # Mark job as completed after the cursor is durably saved
                     if job:
@@ -1480,6 +1659,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                         "meta": meta or {}
                     }
 
+                    if fetch_error:
+                        response_body["partial"] = True
+                        response_body["fetch_error"] = fetch_error
+
                     if next_token_value:
                         response_body["next"] = next_token_value
 
@@ -1492,7 +1675,9 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                 # Phase 4: Upload CSV files to Falcon Next-Gen SIEM
                 phase4_start = time.time()
                 logger.info("Phase 4: Uploading CSV files to NGSIEM...")
-                upload_results = upload_csv_files_to_ngsiem(csv_files, repository, logger, existing_files=existing_files)
+                upload_results = upload_csv_files_to_ngsiem(csv_files, repository, logger,
+                                                              existing_files=existing_files,
+                                                              deadline=deadline)
 
                 phase4_elapsed = time.time() - phase4_start
                 logger.info(f"Phase 4 complete: Uploaded {len(csv_files)} files in {format_elapsed_time(phase4_elapsed)}")
@@ -1511,7 +1696,8 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     }
 
                     # Save state for the appropriate type (single type or all types)
-                    save_update_id(custom_storage, update_data, type_filter, logger)
+                    save_update_id(custom_storage, update_data, type_filter, logger,
+                                   deadline=deadline)
 
                 # Mark job as completed (if job exists)
                 if job:
@@ -1528,6 +1714,10 @@ def on_post(request: Request, _config: Optional[Dict[str, object]], logger: Logg
                     "meta": meta,
                     "process_stats": process_stats  # Include processing statistics
                 }
+
+                if fetch_error:
+                    response_body["partial"] = True
+                    response_body["fetch_error"] = fetch_error
 
                 # Only include next token if there's more data
                 next_token_value = extract_next_token_from_meta(meta, iocs, logger)

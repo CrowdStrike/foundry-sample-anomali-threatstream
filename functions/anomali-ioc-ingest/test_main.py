@@ -392,20 +392,34 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             {"status_code": 200},          # update_job (mark as completed)
         ]
 
-        # Return IOCs with unsupported types BUT meta has a valid "next" URL
-        mock_api_integrations.execute_command_proxy.return_value = {
-            "status_code": 200,
-            "body": {
-                "objects": [
-                    {"id": 1, "itype": "unknown_type", "value": "val1", "update_id": "100"},
-                    {"id": 2, "itype": "another_unknown", "value": "val2", "update_id": "101"}
-                ],
-                "meta": {
-                    "total_count": 1000,
-                    "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+        # Return IOCs with unsupported types BUT meta has a valid "next" URL.
+        # Use side_effect so the multi-page fetcher sees data on page 1 and
+        # an empty page 2 (no next), stopping the loop after one real page.
+        mock_api_integrations.execute_command_proxy.side_effect = [
+            {
+                "status_code": 200,
+                "body": {
+                    "objects": [
+                        {"id": 1, "itype": "unknown_type", "value": "val1", "update_id": "100"},
+                        {"id": 2, "itype": "another_unknown", "value": "val2", "update_id": "101"}
+                    ],
+                    "meta": {
+                        "total_count": 1000,
+                        "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+                    }
                 }
-            }
-        }
+            },
+            {
+                "status_code": 200,
+                "body": {
+                    "objects": [],
+                    "meta": {
+                        "total_count": 1000,
+                        "next": "/api/v2/intelligence/?update_id__gt=101&limit=1000"
+                    }
+                }
+            },
+        ]
 
         request = Request()
         request.body = {"repository": "search-all"}
@@ -1997,6 +2011,75 @@ class AnomaliFunctionTestCase(unittest.TestCase):
         for key in ["itype", "tlp", "value__contains", "value__startswith", "tags.name", "search_filter", "q"]:
             self.assertNotIn(key, result)
 
+    def test_limit_clamped_for_zero(self):
+        """Test that limit=0 is clamped to 1000 (matches Go behavior)."""
+        mock_logger = MagicMock()
+        request = Request()
+        request.body = {"type": "ip", "limit": 0}
+        try:
+            main.on_post(request, _config=None, logger=mock_logger)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass  # Will fail later due to unmocked APIs; we only check the log
+        logged = [str(c) for c in mock_logger.info.call_args_list]
+        self.assertTrue(any("limit=1000" in l for l in logged),
+                        f"Expected limit=1000 in log, got: {logged}")
+
+    def test_limit_clamped_for_negative(self):
+        """Test that limit=-1 is clamped to 1000."""
+        mock_logger = MagicMock()
+        request = Request()
+        request.body = {"type": "ip", "limit": -1}
+        try:
+            main.on_post(request, _config=None, logger=mock_logger)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        logged = [str(c) for c in mock_logger.info.call_args_list]
+        self.assertTrue(any("limit=1000" in l for l in logged),
+                        f"Expected limit=1000 in log, got: {logged}")
+
+    def test_limit_clamped_for_none(self):
+        """Test that limit=None (JSON null) is clamped to 1000 instead of raising TypeError."""
+        mock_logger = MagicMock()
+        request = Request()
+        request.body = {"type": "ip", "limit": None}
+        try:
+            main.on_post(request, _config=None, logger=mock_logger)
+        except TypeError:
+            self.fail("limit=None should not raise TypeError")
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        logged = [str(c) for c in mock_logger.info.call_args_list]
+        self.assertTrue(any("limit=1000" in l for l in logged),
+                        f"Expected limit=1000 in log, got: {logged}")
+
+    def test_limit_clamped_for_string(self):
+        """Test that limit='abc' is clamped to 1000 instead of raising TypeError."""
+        mock_logger = MagicMock()
+        request = Request()
+        request.body = {"type": "ip", "limit": "abc"}
+        try:
+            main.on_post(request, _config=None, logger=mock_logger)
+        except TypeError:
+            self.fail("limit='abc' should not raise TypeError")
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        logged = [str(c) for c in mock_logger.info.call_args_list]
+        self.assertTrue(any("limit=1000" in l for l in logged),
+                        f"Expected limit=1000 in log, got: {logged}")
+
+    def test_limit_valid_value_preserved(self):
+        """Test that a valid limit (e.g. 500) is preserved as-is."""
+        mock_logger = MagicMock()
+        request = Request()
+        request.body = {"type": "ip", "limit": 500}
+        try:
+            main.on_post(request, _config=None, logger=mock_logger)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        logged = [str(c) for c in mock_logger.info.call_args_list]
+        self.assertTrue(any("limit=500" in l for l in logged),
+                        f"Expected limit=500 in log, got: {logged}")
+
     def test_fetch_iocs_multi_status_rate_limit(self):
         """Test fetch_iocs_from_anomali with 207 multi-status containing 429 rate limit."""
         mock_api_integrations = MagicMock()
@@ -2506,6 +2589,238 @@ class AnomaliFunctionTestCase(unittest.TestCase):
 
             self.assertIn("429", str(ctx.exception))
             self.assertIn("after 5 retries", str(ctx.exception))
+
+    # ===== Tests for fetch_iocs_multi_page =====
+
+    @patch("main.fetch_iocs_from_anomali")
+    @patch("main.extract_next_token_from_meta")
+    def test_fetch_iocs_multi_page_single_page_no_next(self, mock_extract, mock_fetch):
+        """Test multi-page fetch stops after one page when no next token."""
+        mock_logger = MagicMock()
+        mock_fetch.return_value = (
+            [{"id": 1, "itype": "ip", "ip": "1.2.3.4"}],
+            {"total_count": 1}
+        )
+        mock_extract.return_value = None  # No next token
+
+        iocs, meta, fetch_error = main.fetch_iocs_multi_page(
+            MagicMock(), {"limit": 1000}, 100 * 1024 * 1024, 300, mock_logger
+        )
+
+        self.assertEqual(len(iocs), 1)
+        self.assertEqual(iocs[0]["ip"], "1.2.3.4")
+        self.assertEqual(meta["total_count"], 1)
+        self.assertIsNone(fetch_error)
+        mock_fetch.assert_called_once()
+
+    @patch("main.fetch_iocs_from_anomali")
+    @patch("main.extract_next_token_from_meta")
+    def test_fetch_iocs_multi_page_multiple_pages(self, mock_extract, mock_fetch):
+        """Test multi-page fetch accumulates IOCs across multiple pages."""
+        mock_logger = MagicMock()
+
+        page1_iocs = [{"id": 1, "itype": "ip", "ip": "1.1.1.1"}]
+        page2_iocs = [{"id": 2, "itype": "ip", "ip": "2.2.2.2"}]
+        page3_iocs = [{"id": 3, "itype": "ip", "ip": "3.3.3.3"}]
+
+        mock_fetch.side_effect = [
+            (page1_iocs, {"next": "http://example.com?search_after=100"}),
+            (page2_iocs, {"next": "http://example.com?search_after=200"}),
+            (page3_iocs, {}),  # Last page, no next
+        ]
+        mock_extract.side_effect = ["100", "200", None]
+
+        iocs, meta, fetch_error = main.fetch_iocs_multi_page(
+            MagicMock(), {"limit": 1000}, 100 * 1024 * 1024, 300, mock_logger
+        )
+
+        self.assertEqual(len(iocs), 3)
+        self.assertEqual(iocs[0]["ip"], "1.1.1.1")
+        self.assertEqual(iocs[1]["ip"], "2.2.2.2")
+        self.assertEqual(iocs[2]["ip"], "3.3.3.3")
+        self.assertEqual(mock_fetch.call_count, 3)
+
+    @patch("main.fetch_iocs_from_anomali")
+    @patch("main.extract_next_token_from_meta")
+    def test_fetch_iocs_multi_page_stops_on_size_limit(self, mock_extract, mock_fetch):
+        """Test multi-page fetch stops when estimated size exceeds max_batch_bytes."""
+        mock_logger = MagicMock()
+
+        # Each page returns 1000 IOCs with realistic field data so that
+        # _estimate_csv_bytes produces a meaningful size.  The measured
+        # per-IOC size (~100 bytes) is used to set a threshold that
+        # triggers after exactly 2 pages.
+        big_page = [
+            {
+                "id": i, "itype": "mal_ip", "ip": f"10.0.{i // 256}.{i % 256}",
+                "confidence": 85, "threat_type": "c2", "source": "Anomali",
+                "meta": {"severity": "high"},
+                "tags": [{"name": "apt"}, {"name": "malware"}],
+                "expiration_ts": "2026-12-31T00:00:00",
+            }
+            for i in range(1000)
+        ]
+
+        # Measure the actual estimated size of one page after slimming
+        slimmed_page = [main._slim_ioc(ioc) for ioc in big_page]  # pylint: disable=protected-access
+        one_page_bytes = main._estimate_csv_bytes(slimmed_page)  # pylint: disable=protected-access
+
+        mock_fetch.side_effect = [
+            (big_page, {"next": "http://example.com?search_after=100"}),
+            (big_page, {"next": "http://example.com?search_after=200"}),
+            (big_page, {}),  # Should not be reached
+        ]
+        mock_extract.side_effect = ["100", "200", None]
+
+        # Set limit between 1 and 2 pages so that page 2 triggers the stop
+        max_batch_bytes = one_page_bytes + (one_page_bytes // 2)
+
+        iocs, meta, fetch_error = main.fetch_iocs_multi_page(
+            MagicMock(), {"limit": 1000}, max_batch_bytes, 300, mock_logger
+        )
+
+        self.assertEqual(len(iocs), 2000)  # Two pages accumulated
+        self.assertEqual(mock_fetch.call_count, 2)  # Stopped after 2nd page
+
+    @patch("main.fetch_iocs_from_anomali")
+    @patch("main.extract_next_token_from_meta")
+    def test_fetch_iocs_multi_page_stops_on_time_limit(self, mock_extract, mock_fetch):
+        """Test multi-page fetch stops when elapsed time exceeds max_fetch_time."""
+        mock_logger = MagicMock()
+
+        page_iocs = [{"id": 1, "itype": "ip", "ip": "1.1.1.1"}]
+
+        mock_fetch.return_value = (page_iocs, {"next": "http://example.com?search_after=100"})
+        mock_extract.return_value = "100"
+
+        # Use max_fetch_time=0 to immediately trigger the time limit after page 1
+        iocs, meta, fetch_error = main.fetch_iocs_multi_page(
+            MagicMock(), {"limit": 1000}, 100 * 1024 * 1024, 0, mock_logger
+        )
+
+        self.assertEqual(len(iocs), 1)  # Only one page fetched
+        mock_fetch.assert_called_once()
+
+    @patch("main.fetch_iocs_from_anomali")
+    @patch("main.extract_next_token_from_meta")
+    def test_fetch_iocs_multi_page_stops_on_zero_iocs(self, mock_extract, mock_fetch):
+        """Test multi-page fetch stops when a page returns zero IOCs (no next token)."""
+        mock_logger = MagicMock()
+
+        mock_fetch.side_effect = [
+            ([{"id": 1, "itype": "ip", "ip": "1.1.1.1"}], {"next": "http://example.com?search_after=100"}),
+            ([], {}),  # Empty page
+        ]
+        mock_extract.side_effect = ["100", None]
+
+        iocs, meta, fetch_error = main.fetch_iocs_multi_page(
+            MagicMock(), {"limit": 1000}, 100 * 1024 * 1024, 300, mock_logger
+        )
+
+        self.assertEqual(len(iocs), 1)  # Only first page's IOCs
+        self.assertEqual(mock_fetch.call_count, 2)
+
+    @patch("main.fetch_iocs_from_anomali")
+    def test_fetch_iocs_multi_page_error_first_page_raises(self, mock_fetch):
+        """Test multi-page fetch raises error when first page fails."""
+        mock_logger = MagicMock()
+        mock_fetch.side_effect = Exception("API connection failed")
+
+        with self.assertRaises(Exception) as ctx:
+            main.fetch_iocs_multi_page(
+                MagicMock(), {"limit": 1000}, 100 * 1024 * 1024, 300, mock_logger
+            )
+
+        self.assertIn("API connection failed", str(ctx.exception))
+
+    @patch("main.fetch_iocs_from_anomali")
+    @patch("main.extract_next_token_from_meta")
+    def test_fetch_iocs_multi_page_error_later_page_returns_accumulated(self, mock_extract, mock_fetch):
+        """Test multi-page fetch returns accumulated IOCs when a later page fails."""
+        mock_logger = MagicMock()
+
+        mock_fetch.side_effect = [
+            ([{"id": 1, "itype": "ip", "ip": "1.1.1.1"}], {"next": "http://example.com?search_after=100"}),
+            Exception("API timeout on page 2"),
+        ]
+        mock_extract.return_value = "100"
+
+        iocs, meta, fetch_error = main.fetch_iocs_multi_page(
+            MagicMock(), {"limit": 1000}, 100 * 1024 * 1024, 300, mock_logger
+        )
+
+        self.assertEqual(len(iocs), 1)
+        self.assertEqual(iocs[0]["ip"], "1.1.1.1")
+        self.assertIsNotNone(fetch_error)
+        self.assertIn("API timeout on page 2", fetch_error)
+
+    @patch("main.fetch_iocs_from_anomali")
+    @patch("main.extract_next_token_from_meta")
+    def test_fetch_iocs_multi_page_updates_search_after(self, mock_extract, mock_fetch):
+        """Test multi-page fetch correctly updates search_after param between pages."""
+        mock_logger = MagicMock()
+
+        mock_fetch.side_effect = [
+            ([{"id": 1}], {"next": "http://example.com?search_after=100"}),
+            ([{"id": 2}], {}),
+        ]
+        mock_extract.side_effect = ["token_page1", None]
+
+        iocs, meta, fetch_error = main.fetch_iocs_multi_page(
+            MagicMock(), {"limit": 1000, "search_after": "initial"}, 100 * 1024 * 1024, 300, mock_logger
+        )
+
+        # Verify page 2 was called with updated search_after
+        call_args = mock_fetch.call_args_list
+        page2_params = call_args[1][0][1]  # Second call, positional args, params dict
+        self.assertEqual(page2_params["search_after"], "token_page1")
+
+    def test_max_batch_size_mb_clamping(self):
+        """Test max_batch_size_mb parameter clamping via on_post: max(1, min(50, val))."""
+        test_cases = [
+            (0, 1),       # Zero → clamped to floor 1
+            (-5, 1),      # Negative → clamped to floor 1
+            (1, 1),       # At lower bound
+            (25, 25),     # Within range
+            (50, 50),     # At upper bound
+            (200, 50),    # Above upper bound → clamped to 50
+        ]
+        for input_val, expected in test_cases:
+            mock_logger = MagicMock()
+            request = Request()
+            request.body = {"type": "ip", "max_batch_size_mb": input_val}
+            try:
+                main.on_post(request, _config=None, logger=mock_logger)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            logged = [str(c) for c in mock_logger.info.call_args_list]
+            self.assertTrue(
+                any(f"max_batch_size_mb={expected}" in l for l in logged),
+                f"max_batch_size_mb clamping({input_val}): expected {expected} in log, got: {logged}")
+
+    def test_max_fetch_time_seconds_clamping(self):
+        """Test max_fetch_time_seconds parameter clamping via on_post: max(30, min(600, val))."""
+        test_cases = [
+            (0, 30),      # Zero → clamped to floor 30
+            (-10, 30),    # Negative → clamped to floor 30
+            (15, 30),     # Below lower bound → clamped to 30
+            (30, 30),     # At lower bound
+            (120, 120),   # Within range
+            (600, 600),   # At upper bound
+            (900, 600),   # Above upper bound → clamped to 600
+        ]
+        for input_val, expected in test_cases:
+            mock_logger = MagicMock()
+            request = Request()
+            request.body = {"type": "ip", "max_fetch_time_seconds": input_val}
+            try:
+                main.on_post(request, _config=None, logger=mock_logger)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            logged = [str(c) for c in mock_logger.info.call_args_list]
+            self.assertTrue(
+                any(f"max_fetch_time_seconds={expected}" in l for l in logged),
+                f"max_fetch_time_seconds clamping({input_val}): expected {expected} in log, got: {logged}")
 
 
 if __name__ == "__main__":
