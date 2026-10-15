@@ -35,12 +35,16 @@ Provides automated threat intelligence ingestion from Anomali ThreatStream APIs 
 - `feed_id`: Comma-separated Anomali feed IDs to filter ingestion (e.g., "0368,1390")
 - `type`: IOC type filter for selective ingestion (options: "ip", "domain", "url", "email", "hash", "md5", "sha1", "sha256")
 - `limit`: Number of records per API call (default: 1000, max: 1000)
+- `max_batch_size_mb`: Max estimated CSV data (MB) to accumulate per invocation before processing (default: 20, range: 1-50)
+- `max_fetch_time_seconds`: Max seconds to spend fetching pages from Anomali before processing (default: 300, range: 30-600)
+
+> **Tip for large feeds**: With defaults, each hourly run processes up to 20 MB. For initial backfill of large feeds, raise `max_batch_size_mb` to 50 and `max_fetch_time_seconds` to 600 to process up to 50 MB per type per run. The function automatically resumes where it left off on the next scheduled run.
+
 - `confidence_gt`: Filter IOCs with confidence score greater than specified value (0-100)
 - `confidence_gte`: Filter IOCs with confidence score greater than or equal to specified value (0-100)
 - `confidence_lt`: Filter IOCs with confidence score less than specified value (0-100)
 - `confidence_lte`: Filter IOCs with confidence score less than or equal to specified value (0-100)
 - `severity`: Filter IOCs by severity level assigned by Anomali machine-learning algorithms
-- `fail_fast_enabled`: Enable early file size estimation to fail fast if projected size exceeds 200 MB limit (default: false)
 
 ### Filtering by Feed ID
 
@@ -52,16 +56,10 @@ To ingest IOCs from specific Anomali ThreatStream feeds, you can configure the `
 2. **Open App Builder**: Find your app, click the three-dot menu, and select **Edit app**
 3. **Access Logic Section**: In the left sidebar, click the **Logic** icon (lightbulb)
 4. **Edit Workflow**: Click on **Anomali Threat Intelligence Ingest** workflow
-5. **Configure First Action**:
-   - Click on the **Anomali Ingest** action card
+5. **Configure Actions**:
+   - Click on each **Anomali Ingest** action card (one per IOC type)
    - Update the `feed_id` field with your comma-separated feed IDs (e.g., `1234,2356`)
-6. **Configure Loop Action**:
-   - Click on the **Anomali Ingest - 2** action card
-   - Add the same `feed_id` value 
-   - Ensure this matches the first action's `feed_id` for consistent filtering
-7. **Save Changes**: Click **Save and exit** in the top right
-
-**Important**: Both `Anomali Ingest` and `Anomali Ingest - 2` actions must use the same `feed_id` value to ensure consistent filtering throughout pagination.
+6. **Save Changes**: Click **Save and exit** in the top right
 
 #### Option 2: Edit Workflow YAML Directly
 
@@ -69,28 +67,16 @@ Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
 
 ```yaml
 actions:
-    AnomaliIngest:
+    IngestIP:
         properties:
             feed_id: "0368,1390"  # Add your Anomali feed IDs
             limit: 1000
             repository: search-all
             status: active
+            type: ip
 ```
 
-Also update the loop action with the same `feed_id`:
-
-```yaml
-loops:
-    Loop:
-        actions:
-            AnomaliIngest2:
-                properties:
-                    feed_id: "0368,1390"  # Must match AnomaliIngest feed_id
-                    limit: 1000
-                    next: ${data['WorkflowCustomVariable.next']}
-                    repository: search-all
-                    status: active
-```
+Repeat for each type-specific action (`IngestDomain`, `IngestURL`, `IngestEmail`, `IngestHash`).
 
 After editing the YAML, redeploy the app using `foundry apps deploy`.
 
@@ -112,16 +98,10 @@ Available confidence parameters:
 2. **Open App Builder**: Find your app, click the three-dot menu, and select **Edit app**
 3. **Access Logic Section**: In the left sidebar, click the **Logic** icon (lightbulb)
 4. **Edit Workflow**: Click on **Anomali Threat Intelligence Ingest** workflow
-5. **Configure First Action**:
-   - Click on the **Anomali Ingest** action card
+5. **Configure Actions**:
+   - Click on each **Anomali Ingest** action card (one per IOC type)
    - Add a confidence filter field (e.g., `confidence_gte: 70` for high-confidence IOCs only)
-6. **Configure Loop Action**:
-   - Click on the **Anomali Ingest - 2** action card
-   - Add the same confidence filter value
-   - Ensure this matches the first action for consistent filtering
-7. **Save Changes**: Click **Save and exit** in the top right
-
-**Important**: Both `Anomali Ingest` and `Anomali Ingest - 2` actions must use the same confidence filter values to ensure consistent filtering throughout pagination.
+6. **Save Changes**: Click **Save and exit** in the top right
 
 #### Option 2: Edit Workflow YAML Directly
 
@@ -129,40 +109,29 @@ Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
 
 ```yaml
 actions:
-    AnomaliIngest:
+    IngestIP:
         properties:
             confidence_gte: 70  # Only ingest IOCs with confidence >= 70
             limit: 1000
             repository: search-all
             status: active
+            type: ip
 ```
 
-Also update the loop action with the same confidence filter:
-
-```yaml
-loops:
-    Loop:
-        actions:
-            AnomaliIngest2:
-                properties:
-                    confidence_gte: 70  # Must match AnomaliIngest confidence filter
-                    limit: 1000
-                    next: ${data['WorkflowCustomVariable.next']}
-                    repository: search-all
-                    status: active
-```
+Repeat for each type-specific action.
 
 You can combine multiple confidence filters for range-based filtering:
 
 ```yaml
 actions:
-    AnomaliIngest:
+    IngestIP:
         properties:
             confidence_gte: 50   # Minimum confidence of 50
             confidence_lt: 90    # Maximum confidence below 90
             limit: 1000
             repository: search-all
             status: active
+            type: ip
 ```
 
 After editing the YAML, redeploy the app using `foundry apps deploy`.
@@ -179,16 +148,10 @@ To ingest only IOCs that match a specific severity level, you can configure the 
 2. **Open App Builder**: Find your app, click the three-dot menu, and select **Edit app**
 3. **Access Logic Section**: In the left sidebar, click the **Logic** icon (lightbulb)
 4. **Edit Workflow**: Click on **Anomali Threat Intelligence Ingest** workflow
-5. **Configure First Action**:
-   - Click on the **Anomali Ingest** action card
+5. **Configure Actions**:
+   - Click on each **Anomali Ingest** action card (one per IOC type)
    - Add a `severity` field with the desired severity level (e.g., `severity: high`)
-6. **Configure Loop Action**:
-   - Click on the **Anomali Ingest - 2** action card
-   - Add the same `severity` value
-   - Ensure this matches the first action for consistent filtering
-7. **Save Changes**: Click **Save and exit** in the top right
-
-**Important**: Both `Anomali Ingest` and `Anomali Ingest - 2` actions must use the same `severity` value to ensure consistent filtering throughout pagination.
+6. **Save Changes**: Click **Save and exit** in the top right
 
 #### Option 2: Edit Workflow YAML Directly
 
@@ -196,28 +159,16 @@ Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
 
 ```yaml
 actions:
-    AnomaliIngest:
+    IngestIP:
         properties:
             severity: high  # Filter by severity level
             limit: 1000
             repository: search-all
             status: active
+            type: ip
 ```
 
-Also update the loop action with the same severity filter:
-
-```yaml
-loops:
-    Loop:
-        actions:
-            AnomaliIngest2:
-                properties:
-                    severity: high  # Must match AnomaliIngest severity
-                    limit: 1000
-                    next: ${data['WorkflowCustomVariable.next']}
-                    repository: search-all
-                    status: active
-```
+Repeat for each type-specific action.
 
 After editing the YAML, redeploy the app using `foundry apps deploy`.
 
@@ -225,64 +176,15 @@ You can combine severity with other filters like confidence for more precise fil
 
 ```yaml
 actions:
-    AnomaliIngest:
+    IngestIP:
         properties:
             severity: high
             confidence_gte: 70
             limit: 1000
             repository: search-all
             status: active
+            type: ip
 ```
-
-### Fail-Fast File Size Estimation
-
-For large IOC datasets, the function can estimate final file sizes after processing the first batch of data. This prevents wasting hours on pagination only to fail at the end when a file exceeds the 200 MB Falcon Next-Gen SIEM upload limit.
-
-**Parameter**: `fail_fast_enabled` (default: `false`)
-
-When enabled, the function:
-1. Processes the first batch of IOCs
-2. Calculates bytes per record and distribution by IOC type
-3. Projects final file sizes based on Anomali's `total_count` metadata
-4. Fails immediately with actionable guidance if any file would exceed 200 MB
-
-**When to Enable**: Enable fail-fast if you're ingesting a large ThreatStream dataset for the first time and want early feedback on whether filtering is needed.
-
-**When to Disable**: Keep disabled (default) when you want the function to process as much data as possible before hitting limits, or when you're incrementally syncing smaller batches.
-
-#### Configuring Fail-Fast in the Workflow
-
-Edit the workflow file `workflows/Anomali_Threat_Intelligence_Ingest.yml`:
-
-```yaml
-actions:
-    AnomaliIngest:
-        properties:
-            fail_fast_enabled: true  # Enable early file size validation
-            limit: 1000
-            repository: search-all
-            status: active
-```
-
-Also update the loop action with the same setting:
-
-```yaml
-loops:
-    Loop:
-        actions:
-            AnomaliIngest2:
-                properties:
-                    fail_fast_enabled: true  # Must match AnomaliIngest setting
-                    limit: 1000
-                    next: ${data['WorkflowCustomVariable.next']}
-                    repository: search-all
-                    status: active
-```
-
-**If fail-fast triggers**, the error message suggests filtering strategies:
-1. Use `feed_id` to limit ingestion to specific threat feeds
-2. Use `confidence_gte` to filter low-confidence IOCs (e.g., `confidence_gte: 70`)
-3. Use `type` parameter to ingest specific IOC types separately
 
 ## Data Output
 
