@@ -608,6 +608,24 @@ def fetch_iocs_from_anomali(
                     f"Rate limit exceeded after {max_retries} retries: {rate_limit_message}"
                 )
 
+            # Handle retryable server errors (500, 503) with exponential backoff
+            if response["status_code"] in (500, 503):
+                if attempt < max_retries:
+                    retry_after = 5 * (2 ** attempt) + random.uniform(0, 2)
+                    logger.warning(
+                        f"Server error (HTTP {response['status_code']}), retrying in "
+                        f"{retry_after:.1f}s (attempt {attempt + 1}/{max_retries})"
+                    )
+                    if deadline and time.time() >= deadline:
+                        raise AnomaliFunctionError(
+                            "Anomali API fetch aborted: function deadline reached"
+                        )
+                    time.sleep(retry_after)
+                    continue
+                raise APIIntegrationError(
+                    f"Server error (HTTP {response['status_code']}) after {max_retries} retries"
+                )
+
             if response["status_code"] not in [200, 207]:
                 error_message = response.get("body", {}).get("errors", "Unknown error")
                 raise APIIntegrationError(
