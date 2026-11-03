@@ -1,10 +1,10 @@
 module anomali-ioc-ingest
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/CrowdStrike/foundry-fn-go v0.24.1
-	github.com/crowdstrike/gofalcon v0.23.0
+	github.com/crowdstrike/gofalcon v0.24.0
 	github.com/go-openapi/runtime v0.33.3
 )
 
