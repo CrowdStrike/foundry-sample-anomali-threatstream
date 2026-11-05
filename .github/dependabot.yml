@@ -25,3 +25,7 @@ updates:
         versions: [">=7.0.0"]
       - dependency-name: "actions/setup-go"
         versions: [">=6.3.0"]
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: weekly

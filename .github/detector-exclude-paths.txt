@@ -1,0 +1,7 @@
+# False positives - sample/placeholder values, not real secrets
+\.github/*
+
+# file already deleted but preserved in history with false positive so excluding
+e2e/src/authenticate.cjs
+
+# Additional false positives (build output, lock files, sample data)
