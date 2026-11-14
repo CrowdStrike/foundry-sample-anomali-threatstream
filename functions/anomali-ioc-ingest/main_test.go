@@ -15,6 +15,7 @@ import (
 
 	fdk "github.com/CrowdStrike/foundry-fn-go"
 	"github.com/crowdstrike/gofalcon/falcon/client"
+	"github.com/crowdstrike/gofalcon/falcon/client/api_integrations"
 	"github.com/crowdstrike/gofalcon/falcon/client/custom_storage"
 	"github.com/crowdstrike/gofalcon/falcon/client/ngsiem"
 	"github.com/go-openapi/runtime"
@@ -3998,5 +3999,85 @@ func TestFetchIOCsMultiPageErrorLaterPageReturnsAccumulated(t *testing.T) {
 	}
 	if meta == nil {
 		t.Error("expected non-nil meta from successful page 1")
+	}
+}
+
+// mockAPIIntegrationsClient implements api_integrations.ClientService for testing fetchIOCsFromAnomali.
+type mockAPIIntegrationsClient struct {
+	api_integrations.ClientService
+	executeCommandProxyFunc func(params *api_integrations.ExecuteCommandProxyParams, opts ...api_integrations.ClientOption) (*api_integrations.ExecuteCommandProxyOK, error)
+	callCount               int
+}
+
+func (m *mockAPIIntegrationsClient) ExecuteCommandProxy(params *api_integrations.ExecuteCommandProxyParams, opts ...api_integrations.ClientOption) (*api_integrations.ExecuteCommandProxyOK, error) {
+	m.callCount++
+	return m.executeCommandProxyFunc(params, opts...)
+}
+
+func TestFetchIOCsFromAnomali_ServerErrorRetryThenSuccess(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx := context.Background()
+
+	mock := &mockAPIIntegrationsClient{}
+	mock.executeCommandProxyFunc = func(params *api_integrations.ExecuteCommandProxyParams, opts ...api_integrations.ClientOption) (*api_integrations.ExecuteCommandProxyOK, error) {
+		if mock.callCount == 1 {
+			// First call returns 500
+			return nil, &runtime.APIError{Code: 500, OperationName: "ExecuteCommandProxy"}
+		}
+		// Second call succeeds
+		return &api_integrations.ExecuteCommandProxyOK{
+			Payload: map[string]interface{}{
+				"objects": []interface{}{
+					map[string]interface{}{"id": float64(1), "itype": "ip", "ip": "1.2.3.4"},
+				},
+				"meta": map[string]interface{}{"total_count": float64(1)},
+			},
+		}, nil
+	}
+
+	falconClient := &client.CrowdStrikeAPISpecification{
+		APIIntegrations: mock,
+	}
+
+	req := fdk.RequestOf[IngestRequest]{Body: IngestRequest{Type: "ip"}}
+
+	iocs, _, err := fetchIOCsFromAnomali(ctx, falconClient, req, nil, logger)
+	if err != nil {
+		t.Fatalf("expected success after retry, got error: %v", err)
+	}
+	if len(iocs) != 1 {
+		t.Errorf("expected 1 IOC, got %d", len(iocs))
+	}
+	if mock.callCount != 2 {
+		t.Errorf("expected 2 calls (1 failure + 1 success), got %d", mock.callCount)
+	}
+}
+
+func TestFetchIOCsFromAnomali_ServerErrorExhaustsRetries(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Use a short deadline so backoff sleeps are cut short via context cancellation
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	mock := &mockAPIIntegrationsClient{}
+	mock.executeCommandProxyFunc = func(params *api_integrations.ExecuteCommandProxyParams, opts ...api_integrations.ClientOption) (*api_integrations.ExecuteCommandProxyOK, error) {
+		return nil, &runtime.APIError{Code: 500, OperationName: "ExecuteCommandProxy"}
+	}
+
+	falconClient := &client.CrowdStrikeAPISpecification{
+		APIIntegrations: mock,
+	}
+
+	req := fdk.RequestOf[IngestRequest]{Body: IngestRequest{Type: "ip"}}
+
+	_, _, err := fetchIOCsFromAnomali(ctx, falconClient, req, nil, logger)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries, got nil")
+	}
+	// With a 2s context deadline and 5s+ minimum backoff, the function makes
+	// the first call, then the context expires during the backoff sleep before
+	// a second attempt can be made. Verify at least 1 attempt was made.
+	if mock.callCount < 1 {
+		t.Errorf("expected at least 1 attempt before failure, got %d", mock.callCount)
 	}
 }

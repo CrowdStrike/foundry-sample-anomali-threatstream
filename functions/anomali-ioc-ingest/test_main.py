@@ -2108,6 +2108,50 @@ class AnomaliFunctionTestCase(unittest.TestCase):
             self.assertEqual(len(iocs), 1)
             self.assertEqual(mock_api_integrations.execute_command_proxy.call_count, 2)
 
+    def test_fetch_iocs_server_error_retry_then_success(self):
+        """Test fetch_iocs_from_anomali retries on HTTP 500 and succeeds."""
+        mock_api_integrations = MagicMock()
+        mock_logger = MagicMock()
+
+        # First call returns 500, second succeeds
+        mock_api_integrations.execute_command_proxy.side_effect = [
+            {"status_code": 500, "body": {"errors": "Internal Server Error"}},
+            {
+                "status_code": 200,
+                "body": {
+                    "objects": [{"id": 1, "itype": "ip", "ip": "1.2.3.4"}],
+                    "meta": {"total_count": 1, "next": None}
+                }
+            }
+        ]
+
+        with patch('main.time.sleep'):
+            iocs, meta = main.fetch_iocs_from_anomali(mock_api_integrations, {}, mock_logger, max_retries=1)
+
+            self.assertEqual(len(iocs), 1)
+            self.assertEqual(mock_api_integrations.execute_command_proxy.call_count, 2)
+            mock_logger.warning.assert_any_call(
+                unittest.mock.ANY  # Verify a warning was logged for the retry
+            )
+
+    def test_fetch_iocs_server_error_exhausts_retries(self):
+        """Test fetch_iocs_from_anomali raises after exhausting retries on HTTP 500."""
+        mock_api_integrations = MagicMock()
+        mock_logger = MagicMock()
+
+        # All calls return 500
+        mock_api_integrations.execute_command_proxy.return_value = {
+            "status_code": 500, "body": {"errors": "Internal Server Error"}
+        }
+
+        with patch('main.time.sleep'):
+            with self.assertRaises(main.APIIntegrationError) as ctx:
+                main.fetch_iocs_from_anomali(mock_api_integrations, {}, mock_logger, max_retries=2)
+
+            self.assertIn("500", str(ctx.exception))
+            # 1 initial + 2 retries = 3 calls
+            self.assertEqual(mock_api_integrations.execute_command_proxy.call_count, 3)
+
     def test_fetch_iocs_non_api_error_retry(self):
         """Test fetch_iocs_from_anomali with non-API error that gets retried."""
         mock_api_integrations = MagicMock()
