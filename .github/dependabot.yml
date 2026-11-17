@@ -1,7 +1,9 @@
 version: 2
 updates:
   - package-ecosystem: pip
-    directory: "/functions/anomali-ioc-ingest/"
+    directories:
+      - "/.github"
+      - "/functions/anomali-ioc-ingest/"
     schedule:
       interval: weekly
   - package-ecosystem: gomod
