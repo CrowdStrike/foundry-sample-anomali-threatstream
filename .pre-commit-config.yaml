@@ -1,0 +1,5 @@
+repos:
+  - repo: https://github.com/betterleaks/betterleaks
+    rev: 39d5bdcf34db54e944facac5cf6e8b03db5e2b99  # v1.10.1
+    hooks:
+      - id: betterleaks

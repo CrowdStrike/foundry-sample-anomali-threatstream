@@ -1,7 +1,9 @@
 version: 2
 updates:
   - package-ecosystem: pip
-    directory: "/functions/anomali-ioc-ingest/"
+    directories:
+      - "/.github"
+      - "/functions/anomali-ioc-ingest/"
     schedule:
       interval: weekly
   - package-ecosystem: gomod
@@ -25,3 +27,7 @@ updates:
         versions: [">=7.0.0"]
       - dependency-name: "actions/setup-go"
         versions: [">=6.3.0"]
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: weekly
